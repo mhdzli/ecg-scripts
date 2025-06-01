@@ -4,6 +4,7 @@ import os
 import argparse
 from scipy import signal
 import matplotlib.pyplot as plt
+import glob
 
 class PanTompkinsDetector:
     """
@@ -372,7 +373,9 @@ def plot_detection_results(ecg_signal, detection_results, valid_peaks,
 
 def main():
     parser = argparse.ArgumentParser(description="Extract ECG beats using Pan-Tompkins algorithm")
-    parser.add_argument("input_file", help="Input ECG JSON file")
+    
+    # Change input_file to input_path to handle both files and directories
+    parser.add_argument("input_path", help="Input ECG JSON file or directory containing JSON files")
     parser.add_argument("-o", "--output", default="extracted_beats", 
                        help="Output folder for beat files (default: extracted_beats)")
     parser.add_argument("-l", "--lead", default="II", 
@@ -388,31 +391,86 @@ def main():
     
     args = parser.parse_args()
     
-    # Validate input file
-    if not os.path.exists(args.input_file):
-        print(f"Error: Input file '{args.input_file}' not found!")
+    # Determine if input is a file or directory
+    if os.path.isfile(args.input_path):
+        # Single file processing
+        json_files = [args.input_path]
+        print("=== ECG Beat Extractor with Pan-Tompkins Algorithm ===")
+        print(f"Processing single file: {args.input_path}")
+    elif os.path.isdir(args.input_path):
+        # Directory processing - find all JSON files
+        json_pattern = os.path.join(args.input_path, "*.json")
+        json_files = glob.glob(json_pattern)
+        
+        if not json_files:
+            print(f"Error: No JSON files found in directory '{args.input_path}'!")
+            return
+        
+        print("=== ECG Beat Extractor with Pan-Tompkins Algorithm (Batch Mode) ===")
+        print(f"Processing directory: {args.input_path}")
+        print(f"Found {len(json_files)} JSON files:")
+        for file in json_files:
+            print(f"  - {os.path.basename(file)}")
+    else:
+        print(f"Error: Input path '{args.input_path}' is neither a file nor a directory!")
         return
     
-    print("=== ECG Beat Extractor with Pan-Tompkins Algorithm ===")
-    print(f"Input file: {args.input_file}")
     print(f"Output folder: {args.output}")
     print(f"Detection lead: {args.lead}")
     print(f"Beat window: {args.window} ms")
     print(f"RR interval range: {args.min_rr}-{args.max_rr} ms")
     print()
     
-    # Extract beats
-    beats = extract_beats_from_json(
-        args.input_file, 
-        args.output,
-        lead_name=args.lead,
-        beat_window_ms=args.window,
-        min_rr_ms=args.min_rr,
-        max_rr_ms=args.max_rr,
-        plot_detection=args.plot
-    )
+    # Process each JSON file
+    total_beats = 0
+    successful_files = 0
     
+    for i, json_file in enumerate(json_files, 1):
+        try:
+            print(f"=== Processing file {i}/{len(json_files)}: {os.path.basename(json_file)} ===")
+            
+            # Create individual output folder for each file
+            base_name = os.path.splitext(os.path.basename(json_file))[0]
+            file_output_folder = os.path.join(args.output, f"{base_name}_beats")
+            
+            # Extract beats
+            beats = extract_beats_from_json(
+                json_file, 
+                file_output_folder,
+                lead_name=args.lead,
+                beat_window_ms=args.window,
+                min_rr_ms=args.min_rr,
+                max_rr_ms=args.max_rr,
+                plot_detection=args.plot
+            )
+            
+            if beats:
+                total_beats += len(beats)
+                successful_files += 1
+                print(f"✓ Successfully extracted {len(beats)} beats from {os.path.basename(json_file)}")
+            else:
+                print(f"⚠ No beats extracted from {os.path.basename(json_file)}")
+            
+            print()  # Add spacing between files
+            
+        except Exception as e:
+            print(f"✗ ERROR processing {os.path.basename(json_file)}: {str(e)}")
+            print()
+            continue
+    
+    # Print summary
+    print("=" * 60)
+    print("BATCH PROCESSING SUMMARY")
+    print("=" * 60)
+    print(f"Total files processed: {len(json_files)}")
+    print(f"Successful extractions: {successful_files}")
+    print(f"Failed extractions: {len(json_files) - successful_files}")
+    print(f"Total beats extracted: {total_beats}")
+    if successful_files > 0:
+        print(f"Average beats per file: {total_beats / successful_files:.1f}")
+    print(f"Output location: {args.output}/")
     print("\nBeat extraction complete!")
+
 
 if __name__ == "__main__":
     main()
