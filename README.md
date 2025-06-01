@@ -47,8 +47,6 @@ The script will:
 4. **Save** everything to a single JSON file with comprehensive metadata
 5. **Display** processing information and data ranges
 
-## Compatibility:
-
 ## Binary to Single JSON Converter (`bin_to_json.py`)
 
 This script converts your binary ECG data into a single comprehensive JSON file. Key features:
@@ -121,7 +119,7 @@ input_file = "path/to/your/bard_ecg_file.txt"
 
 2. **Run the converter**:
 
-```python
+```bash
 python bard_to_json.py
 ```
 
