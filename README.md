@@ -2,13 +2,21 @@
 
 ## China DAT to Single JSON Converter
 
-### Key Features:
+This batch processing script includes several key improvements over the original:
+
+## Key Features:
+
+1. **Batch Processing**: Processes all `.dat` files in a directory automatically
+2. **Flexible Input**: Can process a single file or entire directories
+3. **Command Line Interface**: Easy to use with various options
+4. **Error Handling**: Continues processing even if some files fail
+5. **Progress Tracking**: Shows progress for each file and overall summary
+6. **Configurable Output**: Can specify different output directories
 
 ### **Consistent JSON Structure**
 
 - **Metadata section** with comprehensive information about the data
 - **Leads section** containing all ECG lead data
-- Same organizational pattern as the Holter converter
 
 ### **Enhanced Metadata**
 
@@ -31,21 +39,32 @@
 - **Same derived lead calculations** as original script
 - **Memory-efficient processing** for large files
 
-## Usage:
+## Usage Examples:
 
-Simply update the `input_file` variable at the top of the script and run:
+```bash
+# Process all .dat files in current directory
+python batch_china_to_json.py -i .
 
-```python
-python china_to_json.py
+# Process specific directory with custom output location
+python batch_china_to_json.py -i /path/to/dat/files -o /path/to/json/output
+
+# Process single file
+python batch_china_to_json.py -f input.dat
+
+# Quiet mode (less verbose output)
+python batch_china_to_json.py -i /data -q
+
+# Custom file pattern (case-insensitive)
+python batch_china_to_json.py -i /data -p "*.DAT"
 ```
 
-The script will:
-
-1. **Load** China DAT file (handles both text and binary formats)
-2. **Convert** ADC values to millivolts using specified parameters
-3. **Calculate** derived leads (III, aVR, aVL, aVF)
-4. **Save** everything to a single JSON file with comprehensive metadata
-5. **Display** processing information and data ranges
+- **Modular functions**: Separated file processing logic for reusability
+- **Robust error handling**: Each file is processed independently
+- **Progress reporting**: Shows current file being processed and overall progress
+- **Flexible file discovery**: Uses glob patterns to find files
+- **Summary reporting**: Detailed summary of successful/failed conversions
+- **Timestamps**: Adds processing timestamp to metadata
+- **Memory efficient**: Processes files one at a time rather than loading all into memory
 
 ## Binary to Single JSON Converter (`bin_to_json.py`)
 
