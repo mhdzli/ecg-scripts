@@ -72,7 +72,7 @@ def process_single_file(input_file, output_dir=None, verbose=True):
         if output_dir:
             output_path = Path(output_dir)
             output_path.mkdir(parents=True, exist_ok=True)
-            output_file = output_path / f"{input_path.stem}.json"
+            output_file = output_path / f"chinadat_{input_path.stem}.json"
         else:
             output_file = input_path.parent / f"{input_path.stem}.json"
         
