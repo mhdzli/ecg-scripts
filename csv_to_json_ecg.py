@@ -5,7 +5,7 @@ import numpy as np
 
 # === Configuration ===
 file_group = "csv_ecg"
-input_file = "BRS 2EP.csv"  # Update this path
+input_file = "input.csv"  # Update this path
 output_file = f"{file_group}_{os.path.splitext(input_file)[0].replace(' ', '_')}.json"
 
 # Default sampling rate (update if known)
