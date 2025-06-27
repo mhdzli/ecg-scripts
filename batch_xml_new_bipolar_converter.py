@@ -1,19 +1,47 @@
 import xml.etree.ElementTree as ET
 import json
 import os
+from pathlib import Path
+
+# === Configuration ===
+input_directory = "Bipolar ECG testing"  # Change this to your input directory path
+output_directory = "output"  # Directory where all JSON files will be saved
+file_group = "XML_direct_bipolar"  # Prefix for output files
+
+def create_output_filename(file_path, input_dir, file_group):
+    """Create output filename with subdirectory path included"""
+    # Get relative path from input directory
+    rel_path = os.path.relpath(file_path, input_dir)
+    
+    # Get directory path and filename separately
+    dir_path, filename = os.path.split(rel_path)
+    
+    # Remove only the .xml extension (case insensitive)
+    if filename.lower().endswith('.xml'):
+        base_name = filename[:-4]  # Remove last 4 characters (.xml)
+    else:
+        base_name = os.path.splitext(filename)[0]  # Fallback to splitext
+    
+    # Replace path separators with underscores and create output name
+    if dir_path and dir_path != '.':
+        # Replace both forward and backward slashes with underscores
+        dir_str = dir_path.replace('/', '_').replace('\\', '_')
+        output_name = f"{file_group}_{dir_str}_{base_name}.json"
+    else:
+        output_name = f"{file_group}_{base_name}.json"
+    
+    return output_name
 
 def parse_xml_ecg_file(input_file):
     """
     Parse GE Sapphire ECG XML file and extract relevant data,
     including detailed metadata.
     """
-    print(f"Loading ECG data from {input_file}...")
-
     try:
         tree = ET.parse(input_file)
         root = tree.getroot()
     except ET.ParseError as e:
-        print(f"Error parsing XML file: {e}")
+        print(f"  ❌ Error parsing XML file: {e}")
         return None
 
     # Namespace for GE Sapphire XML
@@ -26,7 +54,7 @@ def parse_xml_ecg_file(input_file):
     }
 
     # === Extract General Metadata ===
-    ecg_data["metadata"]["source_file"] = os.path.basename(input_file)
+    ecg_data["metadata"]["source_file"] = input_file
     ecg_data["metadata"]["data_format"] = "GE Sapphire XML format"
 
     # Extract top-level XML attributes like schema version
@@ -74,9 +102,9 @@ def parse_xml_ecg_file(input_file):
                     waveform_values = [float(val) * scale / 2500.0 for val in waveform_str.split()]
                     ecg_data["leads"][lead_name] = waveform_values
                 except ValueError as e:
-                    print(f"Warning: Could not parse waveform data for lead {lead_name}: {e}")
+                    print(f"  ⚠️  Warning: Could not parse waveform data for lead {lead_name}: {e}")
     else:
-        print("Warning: ECG waveform data not found in the XML file.")
+        print("  ⚠️  Warning: ECG waveform data not found in the XML file.")
 
     # === Add Calculated Metadata (consistent with china_to_json.py) ===
     if ecg_data["leads"] and ecg_data["metadata"].get("sampling_rate"):
@@ -103,24 +131,88 @@ def parse_xml_ecg_file(input_file):
 
     return ecg_data
 
-# === Configuration ===
-file_group = "ge"
-input_xml_file = "input.Xml"  # Set this to the path of your XML file
-output_json_file = f"{file_group}_{os.path.splitext(input_xml_file)[0]}.json"
+def process_xml_file(file_path, output_dir, input_dir, file_group):
+    """Process a single XML file"""
+    try:
+        print(f"Processing: {file_path}")
+        
+        # Parse the XML file
+        parsed_data = parse_xml_ecg_file(file_path)
+        
+        if not parsed_data:
+            print(f"  ❌ Failed to parse {file_path}. Skipping...")
+            return False
+        
+        # Check if we have leads data
+        if not parsed_data.get("leads"):
+            print(f"  ❌ No lead data found in {file_path}. Skipping...")
+            return False
+        
+        # Create output filename
+        output_filename = create_output_filename(file_path, input_dir, file_group)
+        output_path = os.path.join(output_dir, output_filename)
+        
+        # Save JSON file
+        with open(output_path, 'w') as f:
+            json.dump(parsed_data, f, indent=4)
+        
+        # Show summary
+        num_leads = len(parsed_data["leads"])
+        duration = parsed_data["metadata"].get("duration_seconds", "unknown")
+        sampling_rate = parsed_data["metadata"].get("sampling_rate", "unknown")
+        
+        print(f"  ✅ Saved to {output_filename}")
+        print(f"     📊 {num_leads} leads, {duration}s duration, {sampling_rate}Hz sampling rate")
+        return True
+        
+    except Exception as e:
+        print(f"  ❌ Error processing {file_path}: {str(e)}")
+        return False
+
 
 def main():
-    parsed_data = parse_xml_ecg_file(input_xml_file)
-
-    if parsed_data:
-        try:
-            with open(output_json_file, 'w') as f:
-                json.dump(parsed_data, f, indent=4) # Use indent for pretty printing
-            print(f"\nSuccessfully converted {input_xml_file} to {output_json_file}")
-            print(f"Output saved to: {os.path.abspath(output_json_file)}")
-        except IOError as e:
-            print(f"Error writing JSON file: {e}")
-    else:
-        print(f"Failed to parse {input_xml_file}. No JSON output generated.")
+    global file_group
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_directory, exist_ok=True)
+    
+    # Ask user about file group prefix
+    use_default_prefix = input(f"Use default file group prefix '{file_group}'? (y/n): ").lower().strip()
+    
+    if use_default_prefix != 'y':
+        file_group = input("Enter file group prefix: ").strip() or file_group
+    
+    # Find all XML files recursively
+    xml_files = []
+    for root, dirs, files in os.walk(input_directory):
+        for file in files:
+            if file.lower().endswith('.xml'):
+                xml_files.append(os.path.join(root, file))
+    
+    if not xml_files:
+        print("❌ No XML files found in the specified directory.")
+        return
+    
+    print(f"📁 Found {len(xml_files)} XML files to process...")
+    print(f"📤 Output directory: {output_directory}")
+    print(f"🏷️  File group prefix: {file_group}")
+    print("-" * 50)
+    
+    # Process each file
+    successful = 0
+    failed = 0
+    
+    for file_path in xml_files:
+        if process_xml_file(file_path, output_directory, input_directory, file_group):
+            successful += 1
+        else:
+            failed += 1
+    
+    print("-" * 50)
+    print(f"🎉 Processing complete!")
+    print(f"✅ Successfully processed: {successful} files")
+    print(f"❌ Failed: {failed} files")
+    print(f"📁 All outputs saved in: {output_directory}")
 
 if __name__ == "__main__":
     main()

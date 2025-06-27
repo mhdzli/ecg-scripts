@@ -14,7 +14,7 @@ def plot_ecg_matplotlib(json_path):
         print("No leads to plot.")
         return
 
-    sampling_rate = metadata.get("sampling_rate", 500)  # default to 500 Hz
+    sampling_rate = metadata.get("sampling_rate", 1000)  # default to 500 Hz
     lead_names = metadata.get("lead_names", sorted(leads.keys()))
 
     print(f"Plotting {len(lead_names)} leads from {json_path}...")
@@ -36,8 +36,11 @@ def plot_ecg_matplotlib(json_path):
     axes[-1].set_xlabel("Time (s)")
     fig.suptitle(f"ECG Plot - {os.path.basename(json_path)}", fontsize=14)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.show()
+    # plt.show()
+    plt.savefig("output.png", dpi=300)
+    print("✅ Plot saved as output.png")
+
 
 # === Configuration ===
-json_file = "csv_ecg_88.6_V3-V2(2)_derived_bipolar.json"  # Replace with your actual JSON file
+json_file = "input.json"  # Replace with your actual JSON file
 plot_ecg_matplotlib(json_file)
