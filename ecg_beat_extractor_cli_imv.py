@@ -16,12 +16,13 @@ from collections import defaultdict
 
 class EnhancedECGBeatExtractor:
     def __init__(self, method='simple', extraction_method='variable_length', window_size=600, 
-                 min_lead_agreement=1, tolerance_ms=100):
+                 min_lead_agreement=1, tolerance_ms=100, refine_factor=None):
         self.method = method
         self.extraction_method = extraction_method
         self.window_size = window_size
         self.min_lead_agreement = min_lead_agreement
         self.tolerance_ms = tolerance_ms
+        self.refine_factor = refine_factor
         
         # Validate method
         valid_methods = ['simple', 'pan_tompkins', 'hamilton_tompkins', 'wavelet', 'christov', 'ensemble', 'pan_tompkins_simple', 'simple_enhanced']
@@ -495,6 +496,51 @@ class EnhancedECGBeatExtractor:
         
         return sorted(consensus_peaks)
     
+    def refine_r_peaks(self, signal, r_peaks, fs):
+        """
+        Refine R-peak locations by searching for maximum values in intervals around detected peaks
+        """
+        if self.refine_factor is None or len(r_peaks) < 2:
+            return r_peaks
+        
+        refined_peaks = []
+        
+        for i, peak in enumerate(r_peaks):
+            # Calculate interval size for this peak
+            if i == 0:
+                # For first peak, use interval to next peak
+                if len(r_peaks) > 1:
+                    interval = r_peaks[1] - r_peaks[0]
+                else:
+                    interval = int(0.8 * fs)  # Default 800ms
+            elif i == len(r_peaks) - 1:
+                # For last peak, use interval from previous peak
+                interval = r_peaks[i] - r_peaks[i-1]
+            else:
+                # For middle peaks, use average of surrounding intervals
+                prev_interval = r_peaks[i] - r_peaks[i-1]
+                next_interval = r_peaks[i+1] - r_peaks[i]
+                interval = (prev_interval + next_interval) / 2
+            
+            # Calculate search window based on interval factor
+            search_radius = int(interval * self.refine_factor)
+            
+            # Define search window
+            start_search = max(0, peak - search_radius)
+            end_search = min(len(signal), peak)
+            
+            # Find maximum absolute value in the search window
+            if end_search > start_search:
+                search_segment = signal[start_search:end_search]
+                max_idx = np.argmax(search_segment)
+                refined_peak = start_search + max_idx
+                refined_peaks.append(refined_peak)
+            else:
+                # If search window is invalid, keep original peak
+                refined_peaks.append(peak)
+        
+        return np.array(refined_peaks)
+
     def extract_beats_variable_length(self, leads, r_peaks, fs):
         """
         Extract beats with variable length based on RR intervals (like the working example)
@@ -550,7 +596,7 @@ class EnhancedECGBeatExtractor:
             if last_start >= 0 and last_start < signal_length:
                 beat_data = {}
                 for lead_name, signal in leads.items():
-                    beat_data[lead_name] = signal[last_start:].tolist()
+                    beat_data[lead_name] = signal[last_start:last_end].tolist()
                 
                 beats.append({
                     'beat_number': len(r_peaks) - 1,
@@ -695,6 +741,19 @@ class EnhancedECGBeatExtractor:
             print(f"Warning: No R-peaks detected in {filepath}")
             return []
         
+        # Apply R-peak refinement if requested
+        if self.refine_factor is not None:
+            if args.verbose if 'args' in locals() else False:
+                print(f"  Refining R-peaks with factor {self.refine_factor}")
+            
+            if self.min_lead_agreement > 1:
+                # For multi-lead consensus, refine using the detection lead
+                detection_signal = leads[detection_lead]
+                r_peaks = self.refine_r_peaks(detection_signal, r_peaks, fs)
+            else:
+                # For single-lead detection, use the same signal
+                r_peaks = self.refine_r_peaks(ecg_signal, r_peaks, fs)
+
         # Extract beats based on method
         if self.extraction_method == 'variable_length':
             beats = self.extract_beats_variable_length(leads, r_peaks, fs)
@@ -711,6 +770,7 @@ class EnhancedECGBeatExtractor:
                 'detection_lead': detection_lead,
                 'method': self.method,
                 'extraction_method': self.extraction_method,
+                'refine_factor': self.refine_factor,
                 'total_beats': len(beats),
                 'total_r_peaks': len(r_peaks)
             }
@@ -767,11 +827,11 @@ Examples:
   # Use multi-lead consensus with variable-length extraction
   python enhanced_ecg_extractor.py input.json -o output_dir --extraction variable_length --consensus 3
   
-  # Use adaptive window with Pan-Tompkins detection
-  python enhanced_ecg_extractor.py input.json -o output_dir --extraction adaptive -m pan_tompkins
+  # Use adaptive window with Pan-Tompkins detection and R-peak refinement
+  python enhanced_ecg_extractor.py input.json -o output_dir --extraction adaptive -m pan_tompkins --refine-factor 0.1
   
-  # Process directory with fixed windows
-  python enhanced_ecg_extractor.py input_dir/ -o output_dir --extraction fixed -w 500
+  # Process directory with fixed windows and R-peak refinement
+  python enhanced_ecg_extractor.py input_dir/ -o output_dir --extraction fixed -w 500 --refine-factor 0.15
         """
     )
     
@@ -799,6 +859,8 @@ Examples:
                         help='Plot analysis for specified lead')
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Verbose output')
+    parser.add_argument('--refine-factor', type=float, default=None,
+                        help='Interval factor (e.g., 0.1) to refine R-peak locations by searching for max values in surrounding intervals')
     
     args = parser.parse_args()
     
@@ -808,7 +870,8 @@ Examples:
         extraction_method=args.extraction,
         window_size=args.window_size,
         min_lead_agreement=args.consensus,
-        tolerance_ms=args.tolerance
+        tolerance_ms=args.tolerance,
+        refine_factor=args.refine_factor
     )
     
     input_path = Path(args.input)
