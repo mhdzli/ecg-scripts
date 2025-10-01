@@ -901,14 +901,14 @@ def generate_r_peaks_plot(input_file, r_peaks, leads, fs, output_file, detection
         duration_seconds = len(signal) / fs
         
         # Calculate figure width based on signal duration
-        # Base width: 20 inches for up to 60 seconds
-        # Additional width: 5 inches per additional minute
-        base_width = 20
+        # Base width: 80 inches for up to 60 seconds
+        # Additional width: 20 inches per additional minute
+        base_width = 80
         if duration_seconds > 60:
             extra_minutes = (duration_seconds - 60) / 60
-            width = base_width + (extra_minutes * 5)
+            width = base_width + (extra_minutes * 20)
             # Cap maximum width to avoid memory issues
-            width = min(width, 200)
+            width = min(width, 2000)
         else:
             width = base_width
         
