@@ -31,7 +31,8 @@ def load_ecg_json(filepath):
 
 def upsample_signal(signal_data, original_fs, target_fs):
     """
-    Upsample signal from original_fs to target_fs using proper signal processing
+    Upsample signal from original_fs to target_fs using linear interpolation
+    For 250 Hz to 1000 Hz: adds 3 points between each pair of original points
     """
     if original_fs == target_fs:
         return signal_data
@@ -39,15 +40,43 @@ def upsample_signal(signal_data, original_fs, target_fs):
     # Calculate upsampling ratio
     ratio = target_fs / original_fs
     
-    if ratio != int(ratio):
-        print(f"Warning: Non-integer upsampling ratio {ratio}. Using resample method.")
-        # Use scipy.signal.resample for non-integer ratios
-        num_samples = int(len(signal_data) * ratio)
-        upsampled = signal.resample(signal_data, num_samples)
-    else:
-        # Use resample_poly for integer ratios (more efficient and accurate)
-        up = int(ratio)
-        upsampled = signal.resample_poly(signal_data, up, 1)
+    if ratio != 4.0:
+        print(f"Warning: Upsampling ratio is {ratio}, not 4. Using scipy resampling instead of simple interpolation.")
+        # Fallback to scipy for non-4x ratios
+        if ratio != int(ratio):
+            num_samples = int(len(signal_data) * ratio)
+            upsampled = signal.resample(signal_data, num_samples)
+        else:
+            up = int(ratio)
+            upsampled = signal.resample_poly(signal_data, up, 1)
+        return upsampled
+    
+    # Linear interpolation: add 3 points between each pair of original points
+    # For 4x upsampling (250 Hz -> 1000 Hz)
+    n_original = len(signal_data)
+    n_upsampled = (n_original - 1) * 4 + 1  # Each gap gets 3 new points
+    
+    upsampled = np.zeros(n_upsampled)
+    
+    for i in range(n_original - 1):
+        # Original points
+        y0 = signal_data[i]
+        y1 = signal_data[i + 1]
+        
+        # Calculate positions in upsampled array
+        base_idx = i * 4
+        
+        # Place original point
+        upsampled[base_idx] = y0
+        
+        # Add 3 interpolated points between y0 and y1
+        for j in range(1, 4):
+            # Linear interpolation: weight = j/4
+            weight = j / 4.0
+            upsampled[base_idx + j] = y0 + weight * (y1 - y0)
+    
+    # Add the last original point
+    upsampled[-1] = signal_data[-1]
     
     return upsampled
 
@@ -56,7 +85,7 @@ def time_to_samples(time_seconds, sampling_rate):
     return int(time_seconds * sampling_rate)
 
 def combine_ecg_files(edf_file, holter_file, holter_start_time, edf_lead_name='I', 
-                      new_lead_name='GB', output_file=None, use_samples=False):
+                      new_lead_name='BG', output_file=None, use_samples=False):
     """
     Combine EDF and Holter ECG files
     
@@ -71,7 +100,7 @@ def combine_ecg_files(edf_file, holter_file, holter_start_time, edf_lead_name='I
     edf_lead_name : str
         Name of the lead in EDF file to extract (default: 'I')
     new_lead_name : str
-        Name for the new lead in combined file (default: 'GB')
+        Name for the new lead in combined file (default: 'BG')
     output_file : str
         Path for output JSON file (if None, auto-generate name)
     use_samples : bool
@@ -220,7 +249,7 @@ Examples:
   python combine_ecg.py edf.json holter.json 7500 --use-samples -o combined.json
   
   # Holter started 2 minutes into EDF, use custom lead names
-  python combine_ecg.py edf.json holter.json 120.0 --edf-lead I --new-lead-name GB
+  python combine_ecg.py edf.json holter.json 120.0 --edf-lead I --new-lead-name BG
   
   # Holter started at sample 30000 (250 Hz = 120 seconds)
   python combine_ecg.py edf.json holter.json 30000 --use-samples
@@ -237,8 +266,8 @@ Examples:
     parser.add_argument('-o', '--output', help='Output JSON file (default: auto-generated)')
     parser.add_argument('--edf-lead', default='I',
                        help='Lead name to extract from EDF file (default: I)')
-    parser.add_argument('--new-lead-name', default='GB',
-                       help='Name for the new lead in combined file (default: GB)')
+    parser.add_argument('--new-lead-name', default='BG',
+                       help='Name for the new lead in combined file (default: BG)')
     parser.add_argument('--use-samples', action='store_true',
                        help='Interpret holter_start as sample number in EDF (at 250 Hz) instead of seconds')
     parser.add_argument('-v', '--verbose', action='store_true',
