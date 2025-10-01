@@ -2,9 +2,13 @@
 ECG Peak Matching Script
 Finds where Holter recording starts in EDF recording by comparing peak patterns.
 
+Method: Compares time intervals from the first peak to all subsequent peaks.
+For each potential starting position in EDF, calculates intervals from that peak
+to subsequent peaks and matches against Holter's interval pattern.
+
 Usage:
     python script.py --edf path/to/EDF.csv --holter path/to/holter.csv
-    python script.py -e EDF.csv -H holter.csv -o results.png -c report.csv
+    python script.py -e EDF.csv -H holter.csv -o results.png
 """
 
 import pandas as pd
@@ -14,24 +18,25 @@ import matplotlib.pyplot as plt
 import argparse
 import sys
 
-def calculate_intervals(peak_times):
-    """Calculate intervals between consecutive peaks (RR intervals)"""
-    return np.diff(peak_times)
+def calculate_intervals_from_first(peak_times):
+    """Calculate time intervals from the first peak to all subsequent peaks"""
+    return peak_times - peak_times[0]
 
-def normalize_intervals(intervals):
-    """Normalize intervals to account for slight variations"""
-    return intervals / np.mean(intervals)
-
-def find_exact_match(edf_intervals, holter_intervals, tolerance=0.01):
+def find_exact_match(edf_peak_times, holter_intervals_from_first, num_holter_peaks, tolerance=0.01):
     """
     Try to find exact matches within a tolerance
     tolerance: acceptable difference in seconds
     """
     best_matches = []
     
-    for i in range(len(edf_intervals) - len(holter_intervals) + 1):
-        edf_segment = edf_intervals[i:i + len(holter_intervals)]
-        differences = np.abs(edf_segment - holter_intervals)
+    # Try each EDF peak as potential start (up to last - num_holter_peaks)
+    for i in range(len(edf_peak_times) - num_holter_peaks + 1):
+        # Calculate intervals from this potential start peak to subsequent peaks
+        edf_segment_times = edf_peak_times[i:i + num_holter_peaks]
+        edf_intervals_from_first = edf_segment_times - edf_segment_times[0]
+        
+        # Compare with holter intervals
+        differences = np.abs(edf_intervals_from_first - holter_intervals_from_first)
         
         # Check if all differences are within tolerance
         if np.all(differences < tolerance):
@@ -46,24 +51,21 @@ def find_exact_match(edf_intervals, holter_intervals, tolerance=0.01):
     
     return best_matches
 
-def find_best_match_correlation(edf_intervals, holter_intervals):
+def find_best_match_correlation(edf_peak_times, holter_intervals_from_first, num_holter_peaks):
     """
-    Find best match using normalized cross-correlation
-    This handles slight timing variations better
+    Find best match using correlation
     """
-    # Normalize both interval sequences
-    edf_norm = normalize_intervals(edf_intervals)
-    holter_norm = normalize_intervals(holter_intervals)
-    
     best_position = -1
     best_correlation = -np.inf
     correlation_scores = []
     
-    for i in range(len(edf_intervals) - len(holter_intervals) + 1):
-        edf_segment = edf_norm[i:i + len(holter_norm)]
+    for i in range(len(edf_peak_times) - num_holter_peaks + 1):
+        # Calculate intervals from this potential start peak
+        edf_segment_times = edf_peak_times[i:i + num_holter_peaks]
+        edf_intervals_from_first = edf_segment_times - edf_segment_times[0]
         
         # Calculate correlation coefficient
-        corr = np.corrcoef(edf_segment, holter_norm)[0, 1]
+        corr = np.corrcoef(edf_intervals_from_first, holter_intervals_from_first)[0, 1]
         correlation_scores.append(corr)
         
         if corr > best_correlation:
@@ -72,16 +74,20 @@ def find_best_match_correlation(edf_intervals, holter_intervals):
     
     return best_position, best_correlation, correlation_scores
 
-def find_best_match_mse(edf_intervals, holter_intervals):
+def find_best_match_mse(edf_peak_times, holter_intervals_from_first, num_holter_peaks):
     """
     Find best match using Mean Squared Error
     Lower MSE means better match
     """
     mse_scores = []
     
-    for i in range(len(edf_intervals) - len(holter_intervals) + 1):
-        edf_segment = edf_intervals[i:i + len(holter_intervals)]
-        mse = np.mean((edf_segment - holter_intervals) ** 2)
+    for i in range(len(edf_peak_times) - num_holter_peaks + 1):
+        # Calculate intervals from this potential start peak
+        edf_segment_times = edf_peak_times[i:i + num_holter_peaks]
+        edf_intervals_from_first = edf_segment_times - edf_segment_times[0]
+        
+        # Calculate MSE
+        mse = np.mean((edf_intervals_from_first - holter_intervals_from_first) ** 2)
         mse_scores.append(mse)
     
     best_position = np.argmin(mse_scores)
@@ -101,7 +107,6 @@ parser = argparse.ArgumentParser(description='Find where Holter recording starts
 parser.add_argument('--edf', '-e', required=True, help='Path to EDF CSV file')
 parser.add_argument('--holter', '-H', required=True, help='Path to Holter CSV file')
 parser.add_argument('--output', '-o', default='ecg_matching_results.png', help='Output plot filename (default: ecg_matching_results.png)')
-parser.add_argument('--csv-report', '-c', default='interval_comparison.csv', help='Output CSV report filename (default: interval_comparison.csv)')
 
 args = parser.parse_args()
 
@@ -127,13 +132,14 @@ print(f"Holter peaks: {len(holter_df)}")
 edf_peak_times = edf_df['peak_time_sec'].values
 holter_peak_times = holter_df['peak_time_sec'].values
 
-# Calculate RR intervals
-edf_intervals = calculate_intervals(edf_peak_times)
-holter_intervals = calculate_intervals(holter_peak_times)
+# Calculate intervals from first peak
+holter_intervals_from_first = calculate_intervals_from_first(holter_peak_times)
+num_holter_peaks = len(holter_peak_times)
 
-print(f"\nEDF intervals: {len(edf_intervals)}")
-print(f"Holter intervals: {len(holter_intervals)}")
-print(f"Holter recording duration: {holter_peak_times[-1] - holter_peak_times[0]:.2f} seconds")
+print(f"\nEDF peaks: {len(edf_peak_times)}")
+print(f"Holter peaks: {num_holter_peaks}")
+print(f"Holter recording duration: {holter_intervals_from_first[-1]:.2f} seconds")
+print(f"Will test {len(edf_peak_times) - num_holter_peaks + 1} possible starting positions in EDF")
 
 # Step 1: Try exact matches with different tolerances
 print("\n" + "="*70)
@@ -144,7 +150,7 @@ tolerances = [0.005, 0.01, 0.02, 0.05]  # 5ms, 10ms, 20ms, 50ms
 exact_matches_found = False
 
 for tol in tolerances:
-    matches = find_exact_match(edf_intervals, holter_intervals, tolerance=tol)
+    matches = find_exact_match(edf_peak_times, holter_intervals_from_first, num_holter_peaks, tolerance=tol)
     if matches:
         exact_matches_found = True
         print(f"\nFound {len(matches)} match(es) with tolerance {tol*1000:.0f}ms:")
@@ -168,7 +174,7 @@ print("\n" + "="*70)
 print("STEP 2: Finding best match using correlation analysis...")
 print("="*70)
 
-best_pos_corr, best_corr, corr_scores = find_best_match_correlation(edf_intervals, holter_intervals)
+best_pos_corr, best_corr, corr_scores = find_best_match_correlation(edf_peak_times, holter_intervals_from_first, num_holter_peaks)
 
 edf_start_time_corr = edf_peak_times[best_pos_corr]
 edf_sample_corr = edf_df.iloc[best_pos_corr]['peak_sample']
@@ -188,7 +194,7 @@ print("\n" + "="*70)
 print("STEP 3: Finding best match using Mean Squared Error...")
 print("="*70)
 
-best_pos_mse, best_mse, mse_scores = find_best_match_mse(edf_intervals, holter_intervals)
+best_pos_mse, best_mse, mse_scores = find_best_match_mse(edf_peak_times, holter_intervals_from_first, num_holter_peaks)
 
 edf_start_time_mse = edf_peak_times[best_pos_mse]
 edf_sample_mse = edf_df.iloc[best_pos_mse]['peak_sample']
@@ -206,58 +212,24 @@ print("="*70)
 
 # Use correlation-based match for validation
 validation_pos = best_pos_corr
-edf_segment = edf_intervals[validation_pos:validation_pos + len(holter_intervals)]
+edf_segment_times = edf_peak_times[validation_pos:validation_pos + num_holter_peaks]
+edf_intervals_from_first = edf_segment_times - edf_segment_times[0]
 
-# Compare first 10 intervals
-print("\nComparison of first 10 intervals:")
+# Compare first 10 intervals from first peak
+print("\nComparison of time intervals from first peak (first 10):")
 print(f"{'Index':<8} {'EDF (s)':<12} {'Holter (s)':<12} {'Diff (ms)':<12}")
 print("-" * 50)
-for i in range(min(10, len(holter_intervals))):
-    diff_ms = (edf_segment[i] - holter_intervals[i]) * 1000
-    print(f"{i:<8} {edf_segment[i]:<12.6f} {holter_intervals[i]:<12.6f} {diff_ms:<12.3f}")
+for i in range(min(10, num_holter_peaks)):
+    diff_ms = (edf_intervals_from_first[i] - holter_intervals_from_first[i]) * 1000
+    print(f"{i:<8} {edf_intervals_from_first[i]:<12.6f} {holter_intervals_from_first[i]:<12.6f} {diff_ms:<12.3f}")
 
 # Calculate overall statistics
-differences = np.abs(edf_segment - holter_intervals) * 1000  # in ms
+differences = np.abs(edf_intervals_from_first - holter_intervals_from_first) * 1000  # in ms
 print(f"\nOverall statistics (in milliseconds):")
 print(f"  Mean difference: {np.mean(differences):.3f}ms")
 print(f"  Median difference: {np.median(differences):.3f}ms")
 print(f"  Std deviation: {np.std(differences):.3f}ms")
 print(f"  Max difference: {np.max(differences):.3f}ms")
-
-# Create CSV report of interval comparison
-print("\n" + "="*70)
-print("GENERATING CSV REPORT...")
-print("="*70)
-
-# Prepare data for CSV report
-report_data = {
-    'Interval_Index': range(len(holter_intervals)),
-    'EDF_Interval_sec': edf_segment,
-    'Holter_Interval_sec': holter_intervals,
-    'Difference_sec': edf_segment - holter_intervals,
-    'Difference_ms': (edf_segment - holter_intervals) * 1000,
-    'Absolute_Diff_ms': differences,
-    'EDF_Peak_Index': range(validation_pos, validation_pos + len(holter_intervals)),
-    'EDF_Peak_Time_sec': edf_peak_times[validation_pos:validation_pos + len(holter_intervals)],
-    'Holter_Peak_Index': range(len(holter_intervals)),
-    'Holter_Peak_Time_sec': holter_peak_times[:len(holter_intervals)]
-}
-
-report_df = pd.DataFrame(report_data)
-report_df.to_csv(args.csv_report, index=False, float_format='%.6f')
-print(f"\nCSV report saved as '{args.csv_report}'")
-print(f"Report contains {len(report_df)} interval comparisons")
-print("\nColumns in the report:")
-print("  - Interval_Index: Sequential index of the interval")
-print("  - EDF_Interval_sec: RR interval from EDF recording (seconds)")
-print("  - Holter_Interval_sec: RR interval from Holter recording (seconds)")
-print("  - Difference_sec: EDF - Holter difference (seconds)")
-print("  - Difference_ms: EDF - Holter difference (milliseconds)")
-print("  - Absolute_Diff_ms: Absolute difference (milliseconds)")
-print("  - EDF_Peak_Index: Index of peak in EDF file")
-print("  - EDF_Peak_Time_sec: Time of peak in EDF recording")
-print("  - Holter_Peak_Index: Index of peak in Holter file")
-print("  - Holter_Peak_Time_sec: Time of peak in Holter recording")
 
 # Final summary
 print("\n" + "="*70)
@@ -291,16 +263,16 @@ axes[1].legend()
 axes[1].grid(True, alpha=0.3)
 
 # Plot 3: Interval comparison at best match
-comparison_length = min(50, len(holter_intervals))
+comparison_length = min(50, num_holter_peaks)
 x_indices = range(comparison_length)
-edf_segment_plot = edf_segment[:comparison_length]
-holter_segment_plot = holter_intervals[:comparison_length]
+edf_plot = edf_intervals_from_first[:comparison_length]
+holter_plot = holter_intervals_from_first[:comparison_length]
 
-axes[2].plot(x_indices, edf_segment_plot, 'b-', label='EDF', linewidth=2, alpha=0.7)
-axes[2].plot(x_indices, holter_segment_plot, 'r--', label='Holter', linewidth=2, alpha=0.7)
-axes[2].set_xlabel('Interval Index')
-axes[2].set_ylabel('RR Interval (seconds)')
-axes[2].set_title(f'Interval Comparison at Best Match (Position {best_pos_corr})')
+axes[2].plot(x_indices, edf_plot, 'b-', label='EDF', linewidth=2, alpha=0.7)
+axes[2].plot(x_indices, holter_plot, 'r--', label='Holter', linewidth=2, alpha=0.7)
+axes[2].set_xlabel('Peak Index')
+axes[2].set_ylabel('Time from First Peak (seconds)')
+axes[2].set_title(f'Time Intervals from First Peak - Best Match (Position {best_pos_corr})')
 axes[2].legend()
 axes[2].grid(True, alpha=0.3)
 
