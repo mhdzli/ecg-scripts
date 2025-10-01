@@ -1,7 +1,18 @@
+"""
+ECG Peak Matching Script
+Finds where Holter recording starts in EDF recording by comparing peak patterns.
+
+Usage:
+    python script.py --edf path/to/EDF.csv --holter path/to/holter.csv
+    python script.py -e EDF.csv -H holter.csv -o results.png
+"""
+
 import pandas as pd
 import numpy as np
 from scipy import signal
 import matplotlib.pyplot as plt
+import argparse
+import sys
 
 def calculate_intervals(peak_times):
     """Calculate intervals between consecutive peaks (RR intervals)"""
@@ -85,10 +96,28 @@ def convert_to_sample_number(peak_position, edf_sampling_rate=250, holter_sampli
     ratio = holter_sampling_rate / edf_sampling_rate
     return int(peak_position * ratio)
 
+# Parse command line arguments
+parser = argparse.ArgumentParser(description='Find where Holter recording starts in EDF recording by comparing ECG peak patterns.')
+parser.add_argument('--edf', '-e', required=True, help='Path to EDF CSV file')
+parser.add_argument('--holter', '-H', required=True, help='Path to Holter CSV file')
+parser.add_argument('--output', '-o', default='ecg_matching_results.png', help='Output plot filename (default: ecg_matching_results.png)')
+
+args = parser.parse_args()
+
 # Load the CSV files
 print("Loading CSV files...")
-edf_df = pd.read_csv('EDF.csv')
-holter_df = pd.read_csv('holter.csv')
+print(f"EDF file: {args.edf}")
+print(f"Holter file: {args.holter}")
+
+try:
+    edf_df = pd.read_csv(args.edf)
+    holter_df = pd.read_csv(args.holter)
+except FileNotFoundError as e:
+    print(f"Error: {e}")
+    sys.exit(1)
+except Exception as e:
+    print(f"Error loading files: {e}")
+    sys.exit(1)
 
 print(f"EDF peaks: {len(edf_df)}")
 print(f"Holter peaks: {len(holter_df)}")
@@ -240,8 +269,8 @@ axes[2].legend()
 axes[2].grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig('ecg_matching_results.png', dpi=150, bbox_inches='tight')
-print("\nPlot saved as 'ecg_matching_results.png'")
+plt.savefig(args.output, dpi=150, bbox_inches='tight')
+print(f"\nPlot saved as '{args.output}'")
 plt.show()
 
 print("\nAnalysis complete!")
