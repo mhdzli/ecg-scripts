@@ -4,7 +4,7 @@ Finds where Holter recording starts in EDF recording by comparing peak patterns.
 
 Usage:
     python script.py --edf path/to/EDF.csv --holter path/to/holter.csv
-    python script.py -e EDF.csv -H holter.csv -o results.png
+    python script.py -e EDF.csv -H holter.csv -o results.png -c report.csv
 """
 
 import pandas as pd
@@ -101,6 +101,7 @@ parser = argparse.ArgumentParser(description='Find where Holter recording starts
 parser.add_argument('--edf', '-e', required=True, help='Path to EDF CSV file')
 parser.add_argument('--holter', '-H', required=True, help='Path to Holter CSV file')
 parser.add_argument('--output', '-o', default='ecg_matching_results.png', help='Output plot filename (default: ecg_matching_results.png)')
+parser.add_argument('--csv-report', '-c', default='interval_comparison.csv', help='Output CSV report filename (default: interval_comparison.csv)')
 
 args = parser.parse_args()
 
@@ -222,6 +223,41 @@ print(f"  Mean difference: {np.mean(differences):.3f}ms")
 print(f"  Median difference: {np.median(differences):.3f}ms")
 print(f"  Std deviation: {np.std(differences):.3f}ms")
 print(f"  Max difference: {np.max(differences):.3f}ms")
+
+# Create CSV report of interval comparison
+print("\n" + "="*70)
+print("GENERATING CSV REPORT...")
+print("="*70)
+
+# Prepare data for CSV report
+report_data = {
+    'Interval_Index': range(len(holter_intervals)),
+    'EDF_Interval_sec': edf_segment,
+    'Holter_Interval_sec': holter_intervals,
+    'Difference_sec': edf_segment - holter_intervals,
+    'Difference_ms': (edf_segment - holter_intervals) * 1000,
+    'Absolute_Diff_ms': differences,
+    'EDF_Peak_Index': range(validation_pos, validation_pos + len(holter_intervals)),
+    'EDF_Peak_Time_sec': edf_peak_times[validation_pos:validation_pos + len(holter_intervals)],
+    'Holter_Peak_Index': range(len(holter_intervals)),
+    'Holter_Peak_Time_sec': holter_peak_times[:len(holter_intervals)]
+}
+
+report_df = pd.DataFrame(report_data)
+report_df.to_csv(args.csv_report, index=False, float_format='%.6f')
+print(f"\nCSV report saved as '{args.csv_report}'")
+print(f"Report contains {len(report_df)} interval comparisons")
+print("\nColumns in the report:")
+print("  - Interval_Index: Sequential index of the interval")
+print("  - EDF_Interval_sec: RR interval from EDF recording (seconds)")
+print("  - Holter_Interval_sec: RR interval from Holter recording (seconds)")
+print("  - Difference_sec: EDF - Holter difference (seconds)")
+print("  - Difference_ms: EDF - Holter difference (milliseconds)")
+print("  - Absolute_Diff_ms: Absolute difference (milliseconds)")
+print("  - EDF_Peak_Index: Index of peak in EDF file")
+print("  - EDF_Peak_Time_sec: Time of peak in EDF recording")
+print("  - Holter_Peak_Index: Index of peak in Holter file")
+print("  - Holter_Peak_Time_sec: Time of peak in Holter recording")
 
 # Final summary
 print("\n" + "="*70)
