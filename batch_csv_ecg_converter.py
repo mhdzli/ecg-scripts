@@ -126,6 +126,7 @@ def parse_csv_ecg_file(input_file):
     
     if len(unique_lengths) > 1:
         total_samples = min(lead_lengths.values())  # Use minimum length
+        print(f"    Warning: Leads have different lengths. Using minimum: {total_samples}")
         # Truncate all leads to minimum length
         for lead in lead_data:
             lead_data[lead] = lead_data[lead][:total_samples]
