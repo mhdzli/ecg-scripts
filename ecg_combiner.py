@@ -56,7 +56,7 @@ def time_to_samples(time_seconds, sampling_rate):
     return int(time_seconds * sampling_rate)
 
 def combine_ecg_files(edf_file, holter_file, holter_start_time, edf_lead_name='I', 
-                      new_lead_name='GB', output_file=None):
+                      new_lead_name='GB', output_file=None, use_samples=False):
     """
     Combine EDF and Holter ECG files
     
@@ -67,13 +67,15 @@ def combine_ecg_files(edf_file, holter_file, holter_start_time, edf_lead_name='I
     holter_file : str
         Path to Holter JSON file (1000 Hz)
     holter_start_time : float
-        Time in seconds when Holter recording started relative to EDF recording
+        Time in seconds (or sample number if use_samples=True) when Holter recording started relative to EDF recording
     edf_lead_name : str
         Name of the lead in EDF file to extract (default: 'I')
     new_lead_name : str
         Name for the new lead in combined file (default: 'GB')
     output_file : str
         Path for output JSON file (if None, auto-generate name)
+    use_samples : bool
+        If True, holter_start_time is interpreted as sample number in original EDF (at 250 Hz)
     """
     
     print(f"Loading EDF file: {edf_file}")
@@ -92,7 +94,15 @@ def combine_ecg_files(edf_file, holter_file, holter_start_time, edf_lead_name='I
     
     print(f"\nEDF sampling rate: {edf_fs} Hz")
     print(f"Holter sampling rate: {holter_fs} Hz")
-    print(f"Holter starts at: {holter_start_time} seconds in EDF recording")
+    
+    if use_samples:
+        edf_start_sample = int(holter_start_time)
+        holter_start_time_sec = edf_start_sample / edf_fs
+        print(f"Holter starts at: sample {edf_start_sample} in EDF recording ({holter_start_time_sec:.2f} seconds)")
+    else:
+        holter_start_time_sec = holter_start_time
+        edf_start_sample = time_to_samples(holter_start_time, edf_fs)
+        print(f"Holter starts at: {holter_start_time} seconds in EDF recording (sample {edf_start_sample})")
     
     # Check if EDF lead exists
     if edf_lead_name not in edf_leads:
@@ -114,8 +124,13 @@ def combine_ecg_files(edf_file, holter_file, holter_start_time, edf_lead_name='I
     upsampled_edf = upsample_signal(edf_signal, edf_fs, holter_fs)
     print(f"Upsampled signal length: {len(upsampled_edf)} samples ({len(upsampled_edf)/holter_fs:.2f} seconds)")
     
-    # Calculate alignment
-    holter_start_sample = time_to_samples(holter_start_time, holter_fs)
+    # Calculate alignment in the upsampled signal
+    # If using sample numbers, convert from original EDF sample to upsampled sample
+    if use_samples:
+        holter_start_sample = int(edf_start_sample * (holter_fs / edf_fs))
+    else:
+        holter_start_sample = time_to_samples(holter_start_time_sec, holter_fs)
+    
     print(f"\nHolter start sample in upsampled EDF: {holter_start_sample}")
     
     # Get Holter signal length
@@ -147,15 +162,26 @@ def combine_ecg_files(edf_file, holter_file, holter_start_time, edf_lead_name='I
     
     print(f"Aligned EDF segment length: {len(aligned_edf)} samples")
     
-    # Create combined data structure
-    combined_leads = holter_leads.copy()
+    # Create combined data structure - convert all numpy arrays to lists
+    combined_leads = {}
+    for lead_name, lead_data in holter_leads.items():
+        if isinstance(lead_data, np.ndarray):
+            combined_leads[lead_name] = lead_data.tolist()
+        else:
+            combined_leads[lead_name] = lead_data
+    
+    # Add the new lead
     combined_leads[new_lead_name] = aligned_edf.tolist()
     
     # Update metadata
     combined_metadata = holter_metadata.copy()
     combined_metadata['combined_from_edf'] = str(edf_file)
     combined_metadata['edf_lead_source'] = edf_lead_name
-    combined_metadata['holter_start_time_in_edf'] = holter_start_time
+    if use_samples:
+        combined_metadata['holter_start_sample_in_edf'] = edf_start_sample
+        combined_metadata['holter_start_time_in_edf'] = holter_start_time_sec
+    else:
+        combined_metadata['holter_start_time_in_edf'] = holter_start_time_sec
     combined_metadata['edf_original_fs'] = edf_fs
     combined_metadata['edf_upsampled_to_fs'] = holter_fs
     
@@ -190,8 +216,14 @@ Examples:
   # Holter started 30 seconds into EDF recording
   python combine_ecg.py edf.json holter.json 30.0 -o combined.json
   
+  # Holter started at sample 7500 in EDF (250 Hz = 30 seconds)
+  python combine_ecg.py edf.json holter.json 7500 --use-samples -o combined.json
+  
   # Holter started 2 minutes into EDF, use custom lead names
   python combine_ecg.py edf.json holter.json 120.0 --edf-lead I --new-lead-name GB
+  
+  # Holter started at sample 30000 (250 Hz = 120 seconds)
+  python combine_ecg.py edf.json holter.json 30000 --use-samples
   
   # Holter started immediately with EDF
   python combine_ecg.py edf.json holter.json 0.0
@@ -200,13 +232,15 @@ Examples:
     
     parser.add_argument('edf_file', help='EDF JSON file (250 Hz)')
     parser.add_argument('holter_file', help='Holter JSON file (1000 Hz)')
-    parser.add_argument('holter_start_time', type=float,
-                       help='Time in seconds when Holter recording started in EDF recording')
+    parser.add_argument('holter_start', type=float,
+                       help='When Holter started: time in seconds (default) or sample number (with --use-samples)')
     parser.add_argument('-o', '--output', help='Output JSON file (default: auto-generated)')
     parser.add_argument('--edf-lead', default='I',
                        help='Lead name to extract from EDF file (default: I)')
     parser.add_argument('--new-lead-name', default='GB',
                        help='Name for the new lead in combined file (default: GB)')
+    parser.add_argument('--use-samples', action='store_true',
+                       help='Interpret holter_start as sample number in EDF (at 250 Hz) instead of seconds')
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Verbose output')
     
@@ -216,10 +250,11 @@ Examples:
         output_file = combine_ecg_files(
             args.edf_file,
             args.holter_file,
-            args.holter_start_time,
+            args.holter_start,
             edf_lead_name=args.edf_lead,
             new_lead_name=args.new_lead_name,
-            output_file=args.output
+            output_file=args.output,
+            use_samples=args.use_samples
         )
         
         if output_file:
