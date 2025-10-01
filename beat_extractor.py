@@ -2,6 +2,7 @@
 """
 Enhanced ECG Beat Extractor CLI Tool
 Extracts individual heartbeats from custom JSON ECG files using variable-length beat extraction
+Now includes R-peak CSV export/import and dedicated R-peak visualization
 """
 
 import argparse
@@ -9,6 +10,7 @@ import json
 import numpy as np
 import os
 import sys
+import csv
 from pathlib import Path
 from scipy.signal import find_peaks, butter, filtfilt
 import matplotlib.pyplot as plt
@@ -16,16 +18,17 @@ from collections import defaultdict
 
 class EnhancedECGBeatExtractor:
     def __init__(self, method='simple', extraction_method='variable_length', window_size=600, 
-                 min_lead_agreement=1, tolerance_ms=100, refine_factor=None):
+                 min_lead_agreement=1, tolerance_ms=100, refine_factor=None, manual_peaks_file=None):
         self.method = method
         self.extraction_method = extraction_method
         self.window_size = window_size
         self.min_lead_agreement = min_lead_agreement
         self.tolerance_ms = tolerance_ms
         self.refine_factor = refine_factor
+        self.manual_peaks_file = manual_peaks_file
         
         # Validate method
-        valid_methods = ['simple', 'pan_tompkins', 'hamilton_tompkins', 'wavelet', 'christov', 'ensemble', 'pan_tompkins_simple', 'simple_enhanced']
+        valid_methods = ['simple', 'pan_tompkins', 'hamilton_tompkins', 'wavelet', 'christov', 'ensemble', 'pan_tompkins_simple', 'simple_enhanced', 'manual']
         if method not in valid_methods:
             raise ValueError(f"Method must be one of: {valid_methods}")
 
@@ -48,6 +51,63 @@ class EnhancedECGBeatExtractor:
         except Exception as e:
             print(f"Error loading {filepath}: {e}")
             return None, None
+
+    def load_manual_peaks(self, csv_file, original_filename):
+        """Load R-peaks from CSV file for manual method"""
+        try:
+            peaks = []
+            with open(csv_file, 'r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    # Filter peaks for the current file
+                    if row['filename'] == original_filename or row['filename'] == Path(original_filename).name:
+                        peaks.append(int(row['peak_sample']))
+            
+            if not peaks:
+                print(f"Warning: No peaks found for file {original_filename} in {csv_file}")
+                return np.array([])
+            
+            return np.array(sorted(peaks))
+            
+        except Exception as e:
+            print(f"Error loading manual peaks from {csv_file}: {e}")
+            return np.array([])
+
+    def save_peaks_csv(self, peaks, leads, fs, filepath, output_dir, detection_lead):
+        """Save R-peak information to CSV file"""
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        base_name = Path(filepath).stem
+        csv_filename = f"{base_name}_r_peaks.csv"
+        csv_filepath = output_path / csv_filename
+        
+        try:
+            with open(csv_filepath, 'w', newline='') as csvfile:
+                fieldnames = ['filename', 'peak_number', 'peak_sample', 'peak_time_sec', 'amplitude', 'detection_lead', 'sampling_rate']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                
+                writer.writeheader()
+                
+                detection_signal = leads[detection_lead]
+                
+                for i, peak in enumerate(peaks):
+                    writer.writerow({
+                        'filename': Path(filepath).name,
+                        'peak_number': i + 1,
+                        'peak_sample': int(peak),
+                        'peak_time_sec': float(peak / fs),
+                        'amplitude': float(detection_signal[peak]),
+                        'detection_lead': detection_lead,
+                        'sampling_rate': int(fs)
+                    })
+            
+            print(f"R-peaks CSV saved: {csv_filepath}")
+            return str(csv_filepath)
+            
+        except Exception as e:
+            print(f"Error saving peaks CSV: {e}")
+            return None
     
     def preprocess_ecg(self, signal, fs, lowcut=0.5, highcut=40):
         """Preprocess ECG signal with bandpass filtering"""
@@ -710,32 +770,44 @@ class EnhancedECGBeatExtractor:
                 return None
         
         # Detect R-peaks
-        if self.min_lead_agreement > 1:
-            # Use multi-lead consensus
-            r_peaks = self.detect_multi_lead_consensus(leads, fs)
-        else:
-            # Use single lead detection
-            ecg_signal = leads[detection_lead]
-            filtered_signal = self.preprocess_ecg(ecg_signal, fs)
+        if self.method == 'manual':
+            # Load peaks from CSV file
+            if self.manual_peaks_file is None:
+                print("Error: Manual method requires --manual-peaks-file argument")
+                return None
             
-            if self.method == 'simple':
-                r_peaks = self.detect_r_peaks_simple(filtered_signal, fs)
-            elif self.method == 'pan_tompkins':
-                r_peaks = self.detect_r_peaks_pan_tompkins(ecg_signal, fs)
-            elif self.method == 'hamilton_tompkins':
-                r_peaks = self.detect_r_peaks_hamilton_tompkins(ecg_signal, fs)
-            elif self.method == 'wavelet':
-                r_peaks = self.detect_r_peaks_wavelet(ecg_signal, fs)
-            elif self.method == 'christov':
-                r_peaks = self.detect_r_peaks_christov(ecg_signal, fs)
-            elif self.method == 'ensemble':
-                r_peaks = self.detect_r_peaks_ensemble(ecg_signal, fs)
-            elif self.method == 'pan_tompkins_simple':
-                r_peaks = self.detect_r_peaks_pan_tompkins_simple(ecg_signal, fs)
-            elif self.method == 'simple_enhanced':
-                r_peaks = self.detect_r_peaks_simple_enhanced(ecg_signal, fs)
+            r_peaks = self.load_manual_peaks(self.manual_peaks_file, Path(filepath).name)
+            if len(r_peaks) == 0:
+                print(f"Warning: No manual peaks loaded for {filepath}")
+                return []
+        else:
+            # Use automatic peak detection methods
+            if self.min_lead_agreement > 1:
+                # Use multi-lead consensus
+                r_peaks = self.detect_multi_lead_consensus(leads, fs)
             else:
-                raise ValueError(f"Unknown method: {self.method}")
+                # Use single lead detection
+                ecg_signal = leads[detection_lead]
+                filtered_signal = self.preprocess_ecg(ecg_signal, fs)
+                
+                if self.method == 'simple':
+                    r_peaks = self.detect_r_peaks_simple(filtered_signal, fs)
+                elif self.method == 'pan_tompkins':
+                    r_peaks = self.detect_r_peaks_pan_tompkins(ecg_signal, fs)
+                elif self.method == 'hamilton_tompkins':
+                    r_peaks = self.detect_r_peaks_hamilton_tompkins(ecg_signal, fs)
+                elif self.method == 'wavelet':
+                    r_peaks = self.detect_r_peaks_wavelet(ecg_signal, fs)
+                elif self.method == 'christov':
+                    r_peaks = self.detect_r_peaks_christov(ecg_signal, fs)
+                elif self.method == 'ensemble':
+                    r_peaks = self.detect_r_peaks_ensemble(ecg_signal, fs)
+                elif self.method == 'pan_tompkins_simple':
+                    r_peaks = self.detect_r_peaks_pan_tompkins_simple(ecg_signal, fs)
+                elif self.method == 'simple_enhanced':
+                    r_peaks = self.detect_r_peaks_simple_enhanced(ecg_signal, fs)
+                else:
+                    raise ValueError(f"Unknown method: {self.method}")
 
         if len(r_peaks) == 0:
             print(f"Warning: No R-peaks detected in {filepath}")
@@ -774,6 +846,12 @@ class EnhancedECGBeatExtractor:
                 'total_beats': len(beats),
                 'total_r_peaks': len(r_peaks)
             }
+        
+        # Store r_peaks for potential CSV export
+        self._last_r_peaks = r_peaks
+        self._last_leads = leads
+        self._last_fs = fs
+        self._last_detection_lead = detection_lead
         
         return beats
     
@@ -815,134 +893,114 @@ class EnhancedECGBeatExtractor:
         else:
             return obj
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Enhanced ECG Beat Extractor with variable-length beat extraction',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Extract variable-length beats (recommended)
-  python enhanced_ecg_extractor.py input.json -o output_dir --extraction variable_length
-  
-  # Use multi-lead consensus with variable-length extraction
-  python enhanced_ecg_extractor.py input.json -o output_dir --extraction variable_length --consensus 3
-  
-  # Use adaptive window with Pan-Tompkins detection and R-peak refinement
-  python enhanced_ecg_extractor.py input.json -o output_dir --extraction adaptive -m pan_tompkins --refine-factor 0.1
-  
-  # Process directory with fixed windows and R-peak refinement
-  python enhanced_ecg_extractor.py input_dir/ -o output_dir --extraction fixed -w 500 --refine-factor 0.15
-        """
-    )
-    
-    parser.add_argument('input', help='Input JSON file or directory')
-    parser.add_argument('-o', '--output', required=True,
-                        help='Output directory for extracted beats')
-    parser.add_argument('-m', '--method', 
-                        choices=['simple', 'pan_tompkins', 'hamilton_tompkins', 'wavelet', 'christov', 'ensemble', 'pan_tompkins_simple', 'simple_enhanced'],
-                        default='simple', help='Peak detection method')
-    parser.add_argument('--extraction', choices=['fixed', 'adaptive', 'variable_length'],
-                        default='variable_length', help='Beat extraction method')
-    parser.add_argument('-w', '--window-size', type=int, default=600,
-                        help='Fixed window size in samples (for fixed extraction)')
-    parser.add_argument('--consensus', type=int, default=1,
-                        help='Minimum number of leads that must agree on peak location')
-    parser.add_argument('--tolerance', type=int, default=100,
-                        help='Time tolerance in milliseconds for peak consensus')
-    parser.add_argument('-l', '--lead', default='II',
-                        help='Lead to use for single-lead R-peak detection')
-    parser.add_argument('--plot', action='store_true',
-                        help='Generate plots for each processed file')
-    parser.add_argument('--plot-beats', metavar='LEAD',
-                        help='Plot all extracted heartbeats for specified lead')
-    parser.add_argument('--analysis-lead', metavar='LEAD',
-                        help='Plot analysis for specified lead')
-    parser.add_argument('-v', '--verbose', action='store_true',
-                        help='Verbose output')
-    parser.add_argument('--refine-factor', type=float, default=None,
-                        help='Interval factor (e.g., 0.1) to refine R-peak locations by searching for max values in surrounding intervals')
-    
-    args = parser.parse_args()
-    
-    # Initialize extractor
-    extractor = EnhancedECGBeatExtractor(
-        method=args.method,
-        extraction_method=args.extraction,
-        window_size=args.window_size,
-        min_lead_agreement=args.consensus,
-        tolerance_ms=args.tolerance,
-        refine_factor=args.refine_factor
-    )
-    
-    input_path = Path(args.input)
-    
-    # Get list of files to process
-    if input_path.is_file():
-        files_to_process = [input_path]
-    elif input_path.is_dir():
-        files_to_process = list(input_path.glob('*.json'))
-        if not files_to_process:
-            print(f"No JSON files found in {input_path}")
-            sys.exit(1)
-    else:
-        print(f"Input path {input_path} does not exist")
-        sys.exit(1)
-    
-    total_beats = 0
-    processed_files = 0
-    
-    for file_path in files_to_process:
-        if args.verbose:
-            print(f"Processing {file_path}...")
+def generate_r_peaks_plot(input_file, r_peaks, leads, fs, output_file, detection_lead):
+    """Generate wide R-peaks visualization plot for long signals"""
+    try:
+        signal = np.array(leads[detection_lead])
+        time = np.arange(len(signal)) / fs
+        duration_seconds = len(signal) / fs
         
-        try:
-            beats = extractor.extract_beats_from_file(file_path, args.lead)
+        # Calculate figure width based on signal duration
+        # Base width: 20 inches for up to 60 seconds
+        # Additional width: 5 inches per additional minute
+        base_width = 20
+        if duration_seconds > 60:
+            extra_minutes = (duration_seconds - 60) / 60
+            width = base_width + (extra_minutes * 5)
+            # Cap maximum width to avoid memory issues
+            width = min(width, 200)
+        else:
+            width = base_width
+        
+        # Height is fixed but adequate for detail
+        height = 8
+        
+        fig, ax = plt.subplots(1, 1, figsize=(width, height))
+        
+        # Plot full signal with R-peaks
+        ax.plot(time, signal, 'b-', linewidth=1.2, alpha=0.8, label=f'ECG Lead {detection_lead}')
+        ax.plot(time[r_peaks], signal[r_peaks], 'ro', markersize=6, markerfacecolor='red', 
+                markeredgecolor='darkred', markeredgewidth=1, label='R-peaks')
+        
+        # Add peak numbers for all peaks (adjust font size based on number of peaks)
+        if len(r_peaks) <= 100:
+            fontsize = 8
+            show_all = True
+        elif len(r_peaks) <= 500:
+            fontsize = 6
+            show_all = True
+        elif len(r_peaks) <= 1000:
+            fontsize = 5
+            show_all = True
+        else:
+            fontsize = 8
+            show_all = False  # Only show every nth peak for very long recordings
+        
+        if show_all:
+            for i, peak in enumerate(r_peaks):
+                ax.annotate(str(i+1), (time[peak], signal[peak]), 
+                           xytext=(0, 8), textcoords='offset points',
+                           fontsize=fontsize, ha='center', va='bottom',
+                           bbox=dict(boxstyle='round,pad=0.2', facecolor='yellow', alpha=0.7, 
+                                    edgecolor='orange', linewidth=0.5))
+        else:
+            # Show every 10th peak for very long recordings
+            step = max(1, len(r_peaks) // 100)  # Show approximately 100 labels max
+            for i in range(0, len(r_peaks), step):
+                peak = r_peaks[i]
+                ax.annotate(str(i+1), (time[peak], signal[peak]), 
+                           xytext=(0, 8), textcoords='offset points',
+                           fontsize=fontsize, ha='center', va='bottom',
+                           bbox=dict(boxstyle='round,pad=0.2', facecolor='yellow', alpha=0.7, 
+                                    edgecolor='orange', linewidth=0.5))
+        
+        # Set title and labels
+        ax.set_title(f'R-Peak Detection Results - {Path(input_file).name}', fontsize=16, pad=20)
+        ax.set_xlabel('Time (seconds)', fontsize=14)
+        ax.set_ylabel('Amplitude', fontsize=14)
+        ax.legend(fontsize=12, loc='upper right')
+        ax.grid(True, alpha=0.3)
+        
+        # Add comprehensive statistics text
+        if len(r_peaks) > 1:
+            rr_intervals = np.diff(r_peaks) / fs
+            hr = 60 / np.mean(rr_intervals)
+            hr_std = 60 * np.std(rr_intervals) / (np.mean(rr_intervals)**2)
+            min_hr = 60 / np.max(rr_intervals)
+            max_hr = 60 / np.min(rr_intervals)
             
-            if beats is None:
-                print(f"Failed to process {file_path}")
-                continue
+            stats_text = f'Total Peaks: {len(r_peaks)}\n' \
+                        f'Duration: {duration_seconds:.1f} s\n' \
+                        f'Mean HR: {hr:.1f} ± {hr_std:.1f} bpm\n' \
+                        f'HR Range: {min_hr:.0f}-{max_hr:.0f} bpm\n' \
+                        f'Mean RR: {np.mean(rr_intervals)*1000:.0f} ms'
+        else:
+            stats_text = f'Total Peaks: {len(r_peaks)}\n' \
+                        f'Duration: {duration_seconds:.1f} s'
             
-            if len(beats) == 0:
-                print(f"No beats found in {file_path}")
-                continue
-            
-            # Save beats
-            saved_files = extractor.save_beats(beats, args.output, file_path.name)
-            
-            total_beats += len(beats)
-            processed_files += 1
-            
-            print(f"Extracted {len(beats)} beats from {file_path.name} (method: {args.extraction})")
-            if args.verbose:
-                beat_lengths = [beat['window_size'] for beat in beats]
-                print(f"  Beat lengths: {min(beat_lengths)}-{max(beat_lengths)} samples")
-                print(f"  Saved to: {len(saved_files)} files in {args.output}")
-            
-            # Generate plot if requested
-            if args.plot:
-                plot_file = Path(args.output) / f"{file_path.stem}_analysis.png"
-                if args.analysis_lead:
-                    a_lead = args.analysis_lead
-                else:
-                    a_lead = args.lead
-                generate_analysis_plot(file_path, beats, plot_file, args.lead, a_lead)
-            
-            # Generate beats plot if requested
-            if args.plot_beats:
-                plot_file = Path(args.output) / f"{file_path.stem}_beats_{args.plot_beats}.png"
-                generate_beats_plot(beats, plot_file, args.plot_beats, file_path.name)
-                
-        except Exception as e:
-            print(f"Error processing {file_path}: {e}")
-            if args.verbose:
-                import traceback
-                traceback.print_exc()
-    
-    print(f"\nSummary:")
-    print(f"Processed {processed_files} files")
-    print(f"Extracted {total_beats} total beats")
-    print(f"Extraction method: {args.extraction}")
-    print(f"Output directory: {args.output}")
+        ax.text(0.01, 0.99, stats_text, transform=ax.transAxes, 
+                verticalalignment='top', horizontalalignment='left',
+                bbox=dict(boxstyle='round,pad=0.5', facecolor='wheat', alpha=0.9, 
+                         edgecolor='brown', linewidth=1),
+                fontsize=11, family='monospace')
+        
+        # Add time markers every minute for long recordings
+        if duration_seconds > 120:  # Add time markers for signals longer than 2 minutes
+            minute_ticks = np.arange(0, duration_seconds, 60)
+            ax2 = ax.twiny()
+            ax2.set_xlim(ax.get_xlim())
+            ax2.set_xticks(minute_ticks)
+            ax2.set_xticklabels([f'{int(t//60)}m' for t in minute_ticks])
+            ax2.set_xlabel('Time (minutes)', fontsize=12)
+        
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=150, bbox_inches='tight', facecolor='white')
+        plt.close()
+        
+        print(f"R-peaks plot saved: {output_file} (width: {width:.1f} inches, {len(r_peaks)} peaks)")
+        
+    except Exception as e:
+        print(f"Failed to generate R-peaks plot: {e}")
 
 def generate_beats_plot(beats, output_file, lead, filename):
     """Generate plot showing all extracted heartbeats for a specific lead"""
@@ -1093,6 +1151,171 @@ def generate_analysis_plot(input_file, beats, output_file, lead, a_lead):
         
     except Exception as e:
         print(f"  Failed to generate analysis plot: {e}")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Enhanced ECG Beat Extractor with R-peak CSV I/O and dedicated visualization',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Extract variable-length beats and save R-peaks CSV
+  python enhanced_ecg_extractor.py input.json -o output_dir --extraction variable_length --save-peaks-csv
+  
+  # Use manual R-peaks from CSV file
+  python enhanced_ecg_extractor.py input.json -o output_dir --method manual --manual-peaks-file peaks.csv
+  
+  # Generate R-peaks visualization plot
+  python enhanced_ecg_extractor.py input.json -o output_dir --plot-r-peaks
+  
+  # Process with all visualization options
+  python enhanced_ecg_extractor.py input.json -o output_dir --plot --plot-r-peaks --plot-beats II --save-peaks-csv
+        """
+    )
+    
+    parser.add_argument('input', help='Input JSON file or directory')
+    parser.add_argument('-o', '--output', required=True,
+                        help='Output directory for extracted beats')
+    parser.add_argument('-m', '--method', 
+                        choices=['simple', 'pan_tompkins', 'hamilton_tompkins', 'wavelet', 'christov', 'ensemble', 'pan_tompkins_simple', 'simple_enhanced', 'manual'],
+                        default='simple', help='Peak detection method')
+    parser.add_argument('--extraction', choices=['fixed', 'adaptive', 'variable_length'],
+                        default='variable_length', help='Beat extraction method')
+    parser.add_argument('-w', '--window-size', type=int, default=600,
+                        help='Fixed window size in samples (for fixed extraction)')
+    parser.add_argument('--consensus', type=int, default=1,
+                        help='Minimum number of leads that must agree on peak location')
+    parser.add_argument('--tolerance', type=int, default=100,
+                        help='Time tolerance in milliseconds for peak consensus')
+    parser.add_argument('-l', '--lead', default='II',
+                        help='Lead to use for single-lead R-peak detection')
+    parser.add_argument('--plot', action='store_true',
+                        help='Generate plots for each processed file')
+    parser.add_argument('--plot-beats', metavar='LEAD',
+                        help='Plot all extracted heartbeats for specified lead')
+    parser.add_argument('--plot-r-peaks', action='store_true',
+                        help='Generate dedicated R-peaks visualization plot')
+    parser.add_argument('--analysis-lead', metavar='LEAD',
+                        help='Plot analysis for specified lead')
+    parser.add_argument('--save-peaks-csv', action='store_true',
+                        help='Save R-peak information to CSV file')
+    parser.add_argument('--manual-peaks-file', metavar='CSV_FILE',
+                        help='CSV file containing manual R-peak locations (for manual method)')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='Verbose output')
+    parser.add_argument('--refine-factor', type=float, default=None,
+                        help='Interval factor (e.g., 0.1) to refine R-peak locations by searching for max values in surrounding intervals')
+    
+    args = parser.parse_args()
+    
+    # Initialize extractor
+    extractor = EnhancedECGBeatExtractor(
+        method=args.method,
+        extraction_method=args.extraction,
+        window_size=args.window_size,
+        min_lead_agreement=args.consensus,
+        tolerance_ms=args.tolerance,
+        refine_factor=args.refine_factor,
+        manual_peaks_file=args.manual_peaks_file
+    )
+    
+    input_path = Path(args.input)
+    
+    # Get list of files to process
+    if input_path.is_file():
+        files_to_process = [input_path]
+    elif input_path.is_dir():
+        files_to_process = list(input_path.glob('*.json'))
+        if not files_to_process:
+            print(f"No JSON files found in {input_path}")
+            sys.exit(1)
+    else:
+        print(f"Input path {input_path} does not exist")
+        sys.exit(1)
+    
+    total_beats = 0
+    processed_files = 0
+    
+    for file_path in files_to_process:
+        if args.verbose:
+            print(f"Processing {file_path}...")
+        
+        try:
+            beats = extractor.extract_beats_from_file(file_path, args.lead)
+            
+            if beats is None:
+                print(f"Failed to process {file_path}")
+                continue
+            
+            if len(beats) == 0:
+                print(f"No beats found in {file_path}")
+                continue
+            
+            # Save beats
+            saved_files = extractor.save_beats(beats, args.output, file_path.name)
+            
+            total_beats += len(beats)
+            processed_files += 1
+            
+            print(f"Extracted {len(beats)} beats from {file_path.name} (method: {args.extraction})")
+            if args.verbose:
+                beat_lengths = [beat['window_size'] for beat in beats]
+                print(f"  Beat lengths: {min(beat_lengths)}-{max(beat_lengths)} samples")
+                print(f"  Saved to: {len(saved_files)} files in {args.output}")
+            
+            # Save R-peaks CSV if requested
+            if args.save_peaks_csv and hasattr(extractor, '_last_r_peaks'):
+                csv_file = extractor.save_peaks_csv(
+                    extractor._last_r_peaks, 
+                    extractor._last_leads, 
+                    extractor._last_fs, 
+                    file_path, 
+                    args.output, 
+                    extractor._last_detection_lead
+                )
+            
+            # Generate R-peaks plot if requested
+            if args.plot_r_peaks and hasattr(extractor, '_last_r_peaks'):
+                r_peaks_plot_file = Path(args.output) / f"{file_path.stem}_r_peaks.png"
+                generate_r_peaks_plot(
+                    file_path, 
+                    extractor._last_r_peaks, 
+                    extractor._last_leads, 
+                    extractor._last_fs, 
+                    r_peaks_plot_file, 
+                    extractor._last_detection_lead
+                )
+            
+            # Generate analysis plot if requested
+            if args.plot:
+                plot_file = Path(args.output) / f"{file_path.stem}_analysis.png"
+                if args.analysis_lead:
+                    a_lead = args.analysis_lead
+                else:
+                    a_lead = args.lead
+                generate_analysis_plot(file_path, beats, plot_file, args.lead, a_lead)
+            
+            # Generate beats plot if requested
+            if args.plot_beats:
+                plot_file = Path(args.output) / f"{file_path.stem}_beats_{args.plot_beats}.png"
+                generate_beats_plot(beats, plot_file, args.plot_beats, file_path.name)
+                
+        except Exception as e:
+            print(f"Error processing {file_path}: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+    
+    print(f"\nSummary:")
+    print(f"Processed {processed_files} files")
+    print(f"Extracted {total_beats} total beats")
+    print(f"Extraction method: {args.extraction}")
+    print(f"Output directory: {args.output}")
+    
+    if args.save_peaks_csv:
+        print(f"R-peaks CSV files saved in: {args.output}")
+    
+    if args.plot_r_peaks:
+        print(f"R-peaks visualization plots saved in: {args.output}")
 
 if __name__ == '__main__':
     main()
