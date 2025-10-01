@@ -43,5 +43,5 @@ def plot_ecg_from_json(json_path):
     fig.show()
 
 # === Configuration ===
-json_file = "hl7_aecg_20250416-120243-1.json"  # Replace with your actual output JSON path
+json_file = "input.json"  # Replace with your actual output JSON path
 plot_ecg_from_json(json_file)
