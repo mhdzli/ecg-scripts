@@ -1,10 +1,12 @@
 """
 ECG Overlay Comparison Plot
-Overlays EDF and Holter ECG signals for visual comparison at matched time segments.
+Overlays EDF lead I on all Holter leads for visual comparison at matched time segments.
 
 Usage:
     python script.py --edf path/to/edf.json --holter path/to/holter.json --edf-start 10.5 --holter-start 0.0 --holter-end 30.0
     python script.py -e edf.json -H holter.json --edf-start 10.5 --holter-start 0 --holter-end 30 -o comparison.png
+    
+Note: This script plots ALL Holter leads and overlays EDF lead 'I' on each one for comparison.
 """
 
 import json
@@ -91,19 +93,23 @@ def plot_overlay_comparison(edf_path, holter_path, edf_start, holter_start, holt
     print(f"EDF leads: {edf_lead_names}")
     print(f"Holter leads: {holter_lead_names}")
     
-    # Find common leads - plot ALL Holter leads and overlay with matching EDF leads
+    # Find common leads - plot ALL Holter leads and overlay with EDF lead I
     leads_to_plot = holter_lead_names.copy()
     
     print(f"\nWill plot all {len(leads_to_plot)} Holter leads")
+    print(f"EDF lead 'I' will be overlaid on all Holter leads for comparison")
     
-    # Check which leads have matches in EDF
-    matched_leads = [lead for lead in leads_to_plot if lead in edf_lead_names]
-    if matched_leads:
-        print(f"Leads with exact name match in EDF: {matched_leads}")
-    
-    unmatched_leads = [lead for lead in leads_to_plot if lead not in edf_lead_names]
-    if unmatched_leads:
-        print(f"Leads without exact match (will try positional matching): {unmatched_leads}")
+    # Check if lead I exists in EDF
+    edf_lead_i = None
+    if 'I' in edf_leads:
+        edf_lead_i = 'I'
+        print(f"Found EDF lead 'I'")
+    else:
+        print(f"Warning: Lead 'I' not found in EDF. Available leads: {edf_lead_names}")
+        # Try to use the first available lead as fallback
+        if edf_lead_names:
+            edf_lead_i = edf_lead_names[0]
+            print(f"Using '{edf_lead_i}' as fallback")
     
     # Calculate duration
     holter_duration = holter_end - holter_start
@@ -113,6 +119,16 @@ def plot_overlay_comparison(edf_path, holter_path, edf_start, holter_start, holt
     print(f"  Holter: {holter_start:.3f}s to {holter_end:.3f}s (duration: {holter_duration:.3f}s)")
     print(f"  EDF: {edf_start:.3f}s to {edf_end:.3f}s (duration: {holter_duration:.3f}s)")
     
+    # Extract EDF lead I once (will be used for all subplots)
+    edf_time = None
+    edf_segment = None
+    if edf_lead_i and edf_lead_i in edf_leads:
+        edf_signal = edf_leads[edf_lead_i]
+        edf_time, edf_segment = extract_time_segment(
+            edf_signal, edf_sampling_rate, edf_start, edf_end
+        )
+        print(f"Extracted EDF lead '{edf_lead_i}' segment")
+    
     # Create figure - plot ALL Holter leads
     num_leads = len(leads_to_plot)
     fig, axes = plt.subplots(num_leads, 1, figsize=(15, 3 * num_leads), sharex=True)
@@ -120,7 +136,7 @@ def plot_overlay_comparison(edf_path, holter_path, edf_start, holter_start, holt
     if num_leads == 1:
         axes = [axes]
     
-    # Plot each lead
+    # Plot each Holter lead with EDF lead I overlaid
     for i, lead in enumerate(leads_to_plot):
         # Extract Holter segment (always present since we're using holter_lead_names)
         holter_signal = holter_leads[lead]
@@ -130,44 +146,20 @@ def plot_overlay_comparison(edf_path, holter_path, edf_start, holter_start, holt
         
         # Plot Holter signal (in red)
         axes[i].plot(holter_time, holter_segment, 
-                    linewidth=0.8, color='red', label='Holter', alpha=0.7)
+                    linewidth=0.8, color='red', label=f'Holter - {lead}', alpha=0.7)
         
-        # Try to find matching EDF lead
-        edf_lead_name = None
-        edf_plotted = False
-        
-        # First try exact name match
-        if lead in edf_leads:
-            edf_lead_name = lead
-        # If no exact match, try positional matching
-        elif i < len(edf_lead_names):
-            edf_lead_name = edf_lead_names[i]
-            print(f"  Plotting: Holter '{lead}' with EDF '{edf_lead_name}' (positional match)")
-        
-        # Plot EDF signal if we found a match
-        if edf_lead_name and edf_lead_name in edf_leads:
-            edf_signal = edf_leads[edf_lead_name]
-            edf_time, edf_segment = extract_time_segment(
-                edf_signal, edf_sampling_rate, edf_start, edf_end
-            )
-            
-            # Plot EDF signal (in blue)
+        # Plot EDF lead I on top (if available)
+        if edf_segment is not None:
             axes[i].plot(edf_time, edf_segment, 
-                        linewidth=0.8, color='blue', label=f'EDF ({edf_lead_name})', alpha=0.7)
-            edf_plotted = True
+                        linewidth=0.8, color='blue', label=f'EDF - {edf_lead_i}', alpha=0.7)
             
             # Include both signals in y-axis calculation
             all_values = list(holter_segment) + list(edf_segment)
         else:
-            print(f"  Warning: No EDF lead available for Holter lead '{lead}'")
             all_values = list(holter_segment)
         
         # Configure subplot
-        lead_label = f"{lead}"
-        if edf_plotted and edf_lead_name != lead:
-            lead_label += f" / {edf_lead_name}"
-        
-        axes[i].set_ylabel(f"{lead_label}\n(mV)", fontsize=10)
+        axes[i].set_ylabel(f"Holter: {lead}\n(mV)", fontsize=10)
         axes[i].grid(True, alpha=0.3)
         axes[i].legend(loc='upper right', fontsize=8)
         
@@ -185,7 +177,8 @@ def plot_overlay_comparison(edf_path, holter_path, edf_start, holter_start, holt
     axes[-1].set_xlim([0, holter_duration])
     
     # Add title with matching information
-    title = f"ECG Overlay Comparison - All {num_leads} Leads\n"
+    edf_lead_label = edf_lead_i if edf_lead_i else "N/A"
+    title = f"ECG Overlay Comparison - EDF Lead '{edf_lead_label}' on All {num_leads} Holter Leads\n"
     title += f"EDF: {os.path.basename(edf_path)} (t={edf_start:.2f}s-{edf_end:.2f}s) | "
     title += f"Holter: {os.path.basename(holter_path)} (t={holter_start:.2f}s-{holter_end:.2f}s)"
     fig.suptitle(title, fontsize=12, fontweight='bold')
