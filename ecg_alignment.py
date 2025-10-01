@@ -1,191 +1,247 @@
 import pandas as pd
 import numpy as np
-from scipy import stats
+from scipy import signal
+import matplotlib.pyplot as plt
 
 def calculate_intervals(peak_times):
-    """Calculate RR intervals from peak times"""
+    """Calculate intervals between consecutive peaks (RR intervals)"""
     return np.diff(peak_times)
+
+def normalize_intervals(intervals):
+    """Normalize intervals to account for slight variations"""
+    return intervals / np.mean(intervals)
 
 def find_exact_match(edf_intervals, holter_intervals, tolerance=0.01):
     """
-    Try to find exact match with tolerance (in seconds)
-    Returns list of matching start positions
+    Try to find exact matches within a tolerance
+    tolerance: acceptable difference in seconds
     """
-    matches = []
-    n_holter = len(holter_intervals)
+    best_matches = []
     
-    for i in range(len(edf_intervals) - n_holter + 1):
-        edf_window = edf_intervals[i:i + n_holter]
-        differences = np.abs(edf_window - holter_intervals)
+    for i in range(len(edf_intervals) - len(holter_intervals) + 1):
+        edf_segment = edf_intervals[i:i + len(holter_intervals)]
+        differences = np.abs(edf_segment - holter_intervals)
         
+        # Check if all differences are within tolerance
         if np.all(differences < tolerance):
-            matches.append(i)
+            max_diff = np.max(differences)
+            mean_diff = np.mean(differences)
+            best_matches.append({
+                'position': i,
+                'max_diff': max_diff,
+                'mean_diff': mean_diff,
+                'match_quality': 'EXACT'
+            })
     
-    return matches
+    return best_matches
 
-def calculate_match_score(edf_intervals, holter_intervals):
+def find_best_match_correlation(edf_intervals, holter_intervals):
     """
-    Calculate similarity score between two interval sequences
-    Lower score = better match
-    Returns mean absolute difference
+    Find best match using normalized cross-correlation
+    This handles slight timing variations better
     """
-    return np.mean(np.abs(edf_intervals - holter_intervals))
-
-def find_best_match(edf_intervals, holter_intervals):
-    """
-    Find best matching position using sliding window
-    Returns position, score, and correlation
-    """
-    n_holter = len(holter_intervals)
-    best_score = float('inf')
+    # Normalize both interval sequences
+    edf_norm = normalize_intervals(edf_intervals)
+    holter_norm = normalize_intervals(holter_intervals)
+    
     best_position = -1
-    best_correlation = -1
+    best_correlation = -np.inf
+    correlation_scores = []
     
-    scores = []
-    
-    for i in range(len(edf_intervals) - n_holter + 1):
-        edf_window = edf_intervals[i:i + n_holter]
+    for i in range(len(edf_intervals) - len(holter_intervals) + 1):
+        edf_segment = edf_norm[i:i + len(holter_norm)]
         
-        # Calculate mean absolute error
-        score = calculate_match_score(edf_window, holter_intervals)
-        scores.append(score)
+        # Calculate correlation coefficient
+        corr = np.corrcoef(edf_segment, holter_norm)[0, 1]
+        correlation_scores.append(corr)
         
-        # Calculate correlation
-        if np.std(edf_window) > 0 and np.std(holter_intervals) > 0:
-            correlation, _ = stats.pearsonr(edf_window, holter_intervals)
-        else:
-            correlation = 0
-        
-        if score < best_score:
-            best_score = score
+        if corr > best_correlation:
+            best_correlation = corr
             best_position = i
-            best_correlation = correlation
     
-    return best_position, best_score, best_correlation, scores
+    return best_position, best_correlation, correlation_scores
 
-def main():
-    # Read CSV files
-    print("Reading CSV files...")
-    edf_data = pd.read_csv('EDF.csv')
-    holter_data = pd.read_csv('holter.csv')
+def find_best_match_mse(edf_intervals, holter_intervals):
+    """
+    Find best match using Mean Squared Error
+    Lower MSE means better match
+    """
+    mse_scores = []
     
-    print(f"EDF peaks: {len(edf_data)}")
-    print(f"Holter peaks: {len(holter_data)}")
+    for i in range(len(edf_intervals) - len(holter_intervals) + 1):
+        edf_segment = edf_intervals[i:i + len(holter_intervals)]
+        mse = np.mean((edf_segment - holter_intervals) ** 2)
+        mse_scores.append(mse)
     
-    # Calculate intervals
-    print("\nCalculating intervals...")
-    edf_intervals = calculate_intervals(edf_data['peak_time_sec'].values)
-    holter_intervals = calculate_intervals(holter_data['peak_time_sec'].values)
+    best_position = np.argmin(mse_scores)
+    best_mse = mse_scores[best_position]
     
-    print(f"EDF intervals: {len(edf_intervals)}")
-    print(f"Holter intervals: {len(holter_intervals)}")
-    
-    # Try exact match with increasing tolerances
-    print("\n" + "="*60)
-    print("TRYING EXACT MATCHES WITH TOLERANCE")
-    print("="*60)
-    
-    tolerances = [0.001, 0.005, 0.01, 0.02, 0.05]
-    exact_match_found = False
-    
-    for tol in tolerances:
-        matches = find_exact_match(edf_intervals, holter_intervals, tolerance=tol)
-        if matches:
-            print(f"\n✓ Found {len(matches)} exact match(es) with tolerance {tol}s:")
-            for match_idx in matches:
-                edf_peak_idx = match_idx  # This is the peak index (0-based)
-                edf_start_time = edf_data['peak_time_sec'].iloc[edf_peak_idx]
-                holter_start_time = holter_data['peak_time_sec'].iloc[0]
-                
-                print(f"\n  Match at EDF peak index: {edf_peak_idx}")
-                print(f"  EDF peak time: {edf_start_time:.3f} seconds")
-                print(f"  Holter starts at: {holter_start_time:.3f} seconds")
-                print(f"  Time offset: {edf_start_time - holter_start_time:.3f} seconds")
-                
-                # Show first few interval comparisons
-                print(f"\n  First 5 interval comparisons:")
-                for j in range(min(5, len(holter_intervals))):
-                    edf_int = edf_intervals[match_idx + j]
-                    holter_int = holter_intervals[j]
-                    diff = abs(edf_int - holter_int)
-                    print(f"    Interval {j}: EDF={edf_int:.4f}s, Holter={holter_int:.4f}s, Diff={diff:.4f}s")
+    return best_position, best_mse, mse_scores
+
+def convert_to_sample_number(peak_position, edf_sampling_rate=250, holter_sampling_rate=1000):
+    """
+    Convert peak position to sample numbers accounting for different sampling rates
+    """
+    ratio = holter_sampling_rate / edf_sampling_rate
+    return int(peak_position * ratio)
+
+# Load the CSV files
+print("Loading CSV files...")
+edf_df = pd.read_csv('EDF.csv')
+holter_df = pd.read_csv('holter.csv')
+
+print(f"EDF peaks: {len(edf_df)}")
+print(f"Holter peaks: {len(holter_df)}")
+
+# Extract peak times
+edf_peak_times = edf_df['peak_time_sec'].values
+holter_peak_times = holter_df['peak_time_sec'].values
+
+# Calculate RR intervals
+edf_intervals = calculate_intervals(edf_peak_times)
+holter_intervals = calculate_intervals(holter_peak_times)
+
+print(f"\nEDF intervals: {len(edf_intervals)}")
+print(f"Holter intervals: {len(holter_intervals)}")
+print(f"Holter recording duration: {holter_peak_times[-1] - holter_peak_times[0]:.2f} seconds")
+
+# Step 1: Try exact matches with different tolerances
+print("\n" + "="*70)
+print("STEP 1: Searching for exact matches...")
+print("="*70)
+
+tolerances = [0.005, 0.01, 0.02, 0.05]  # 5ms, 10ms, 20ms, 50ms
+exact_matches_found = False
+
+for tol in tolerances:
+    matches = find_exact_match(edf_intervals, holter_intervals, tolerance=tol)
+    if matches:
+        exact_matches_found = True
+        print(f"\nFound {len(matches)} match(es) with tolerance {tol*1000:.0f}ms:")
+        for match in matches:
+            edf_peak_idx = match['position']
+            edf_start_time = edf_peak_times[edf_peak_idx]
+            edf_sample_num = edf_df.iloc[edf_peak_idx]['peak_sample']
             
-            exact_match_found = True
-            break
-    
-    if not exact_match_found:
-        print("\n✗ No exact matches found with tested tolerances")
-    
-    # Find best match using correlation
-    print("\n" + "="*60)
-    print("FINDING BEST MATCH (PATTERN CORRELATION)")
-    print("="*60)
-    
-    best_position, best_score, best_correlation, all_scores = find_best_match(
-        edf_intervals, holter_intervals
-    )
-    
-    edf_start_time = edf_data['peak_time_sec'].iloc[best_position]
-    holter_start_time = holter_data['peak_time_sec'].iloc[0]
-    
-    print(f"\nBest match found at EDF peak index: {best_position}")
-    print(f"EDF peak time: {edf_start_time:.3f} seconds")
-    print(f"Holter starts at: {holter_start_time:.3f} seconds")
-    print(f"Time offset: {edf_start_time - holter_start_time:.3f} seconds")
-    print(f"Match score (MAE): {best_score:.4f} seconds")
-    print(f"Correlation coefficient: {best_correlation:.4f}")
-    
-    # Show interval comparisons
-    print(f"\nFirst 10 interval comparisons at best match:")
-    for j in range(min(10, len(holter_intervals))):
-        edf_int = edf_intervals[best_position + j]
-        holter_int = holter_intervals[j]
-        diff = abs(edf_int - holter_int)
-        print(f"  Interval {j}: EDF={edf_int:.4f}s, Holter={holter_int:.4f}s, Diff={diff:.4f}s")
-    
-    # Show statistics
-    print("\n" + "="*60)
-    print("STATISTICS")
-    print("="*60)
-    
-    all_scores = np.array(all_scores)
-    print(f"\nMatch scores across all positions:")
-    print(f"  Best (minimum): {np.min(all_scores):.4f}s")
-    print(f"  Median: {np.median(all_scores):.4f}s")
-    print(f"  Mean: {np.mean(all_scores):.4f}s")
-    print(f"  Worst (maximum): {np.max(all_scores):.4f}s")
-    
-    # Find top 5 matches
-    top_5_indices = np.argsort(all_scores)[:5]
-    print(f"\nTop 5 best matching positions:")
-    for rank, idx in enumerate(top_5_indices, 1):
-        score = all_scores[idx]
-        time = edf_data['peak_time_sec'].iloc[idx]
-        print(f"  {rank}. Peak index {idx}, time {time:.3f}s, score {score:.4f}s")
-    
-    # Calculate quality of match
-    print("\n" + "="*60)
-    print("MATCH QUALITY ASSESSMENT")
-    print("="*60)
-    
-    score_improvement = (np.median(all_scores) - best_score) / np.median(all_scores) * 100
-    
-    if best_correlation > 0.95 and best_score < 0.02:
-        quality = "EXCELLENT"
-    elif best_correlation > 0.9 and best_score < 0.05:
-        quality = "GOOD"
-    elif best_correlation > 0.8 and best_score < 0.1:
-        quality = "MODERATE"
-    else:
-        quality = "POOR - Manual verification recommended"
-    
-    print(f"\nMatch Quality: {quality}")
-    print(f"Score improvement over median: {score_improvement:.1f}%")
-    
-    if best_correlation > 0.9:
-        print("\n✓ High correlation suggests reliable match")
-    else:
-        print("\n⚠ Low correlation - match may be unreliable")
+            print(f"  - EDF peak index: {edf_peak_idx}")
+            print(f"    EDF peak sample: {edf_sample_num}")
+            print(f"    EDF start time: {edf_start_time:.3f} seconds")
+            print(f"    Max difference: {match['max_diff']*1000:.2f}ms")
+            print(f"    Mean difference: {match['mean_diff']*1000:.2f}ms")
+        break
 
-if __name__ == "__main__":
-    main()
+if not exact_matches_found:
+    print("No exact matches found with tested tolerances.")
+
+# Step 2: Find best match using correlation
+print("\n" + "="*70)
+print("STEP 2: Finding best match using correlation analysis...")
+print("="*70)
+
+best_pos_corr, best_corr, corr_scores = find_best_match_correlation(edf_intervals, holter_intervals)
+
+edf_start_time_corr = edf_peak_times[best_pos_corr]
+edf_sample_corr = edf_df.iloc[best_pos_corr]['peak_sample']
+
+print(f"\nBest match by correlation:")
+print(f"  EDF peak index: {best_pos_corr}")
+print(f"  EDF peak sample: {edf_sample_corr}")
+print(f"  EDF start time: {edf_start_time_corr:.3f} seconds")
+print(f"  Correlation coefficient: {best_corr:.6f}")
+
+# Calculate sample number for Holter equivalent (accounting for 4x sampling rate)
+holter_equivalent_sample = convert_to_sample_number(best_pos_corr)
+print(f"  Holter equivalent sample (at 1000Hz): {holter_equivalent_sample}")
+
+# Step 3: Find best match using MSE
+print("\n" + "="*70)
+print("STEP 3: Finding best match using Mean Squared Error...")
+print("="*70)
+
+best_pos_mse, best_mse, mse_scores = find_best_match_mse(edf_intervals, holter_intervals)
+
+edf_start_time_mse = edf_peak_times[best_pos_mse]
+edf_sample_mse = edf_df.iloc[best_pos_mse]['peak_sample']
+
+print(f"\nBest match by MSE:")
+print(f"  EDF peak index: {best_pos_mse}")
+print(f"  EDF peak sample: {edf_sample_mse}")
+print(f"  EDF start time: {edf_start_time_mse:.3f} seconds")
+print(f"  MSE: {best_mse:.6f}")
+
+# Step 4: Validate the best match
+print("\n" + "="*70)
+print("STEP 4: Validation of best match...")
+print("="*70)
+
+# Use correlation-based match for validation
+validation_pos = best_pos_corr
+edf_segment = edf_intervals[validation_pos:validation_pos + len(holter_intervals)]
+
+# Compare first 10 intervals
+print("\nComparison of first 10 intervals:")
+print(f"{'Index':<8} {'EDF (s)':<12} {'Holter (s)':<12} {'Diff (ms)':<12}")
+print("-" * 50)
+for i in range(min(10, len(holter_intervals))):
+    diff_ms = (edf_segment[i] - holter_intervals[i]) * 1000
+    print(f"{i:<8} {edf_segment[i]:<12.6f} {holter_intervals[i]:<12.6f} {diff_ms:<12.3f}")
+
+# Calculate overall statistics
+differences = np.abs(edf_segment - holter_intervals) * 1000  # in ms
+print(f"\nOverall statistics (in milliseconds):")
+print(f"  Mean difference: {np.mean(differences):.3f}ms")
+print(f"  Median difference: {np.median(differences):.3f}ms")
+print(f"  Std deviation: {np.std(differences):.3f}ms")
+print(f"  Max difference: {np.max(differences):.3f}ms")
+
+# Final summary
+print("\n" + "="*70)
+print("FINAL SUMMARY")
+print("="*70)
+print(f"\nHolter recording starts at:")
+print(f"  EDF Peak Index: {best_pos_corr}")
+print(f"  EDF Peak Sample: {edf_sample_corr}")
+print(f"  EDF Time: {edf_start_time_corr:.3f} seconds")
+print(f"  Confidence: {best_corr:.4f} (correlation coefficient)")
+
+# Plot the results
+fig, axes = plt.subplots(3, 1, figsize=(14, 10))
+
+# Plot 1: Correlation scores across all positions
+axes[0].plot(corr_scores, linewidth=1)
+axes[0].axvline(best_pos_corr, color='r', linestyle='--', label=f'Best match at {best_pos_corr}')
+axes[0].set_xlabel('EDF Peak Index')
+axes[0].set_ylabel('Correlation Coefficient')
+axes[0].set_title('Correlation Score vs Position')
+axes[0].legend()
+axes[0].grid(True, alpha=0.3)
+
+# Plot 2: MSE scores across all positions
+axes[1].plot(mse_scores, linewidth=1, color='orange')
+axes[1].axvline(best_pos_mse, color='r', linestyle='--', label=f'Best match at {best_pos_mse}')
+axes[1].set_xlabel('EDF Peak Index')
+axes[1].set_ylabel('Mean Squared Error')
+axes[1].set_title('MSE vs Position')
+axes[1].legend()
+axes[1].grid(True, alpha=0.3)
+
+# Plot 3: Interval comparison at best match
+comparison_length = min(50, len(holter_intervals))
+x_indices = range(comparison_length)
+edf_segment_plot = edf_segment[:comparison_length]
+holter_segment_plot = holter_intervals[:comparison_length]
+
+axes[2].plot(x_indices, edf_segment_plot, 'b-', label='EDF', linewidth=2, alpha=0.7)
+axes[2].plot(x_indices, holter_segment_plot, 'r--', label='Holter', linewidth=2, alpha=0.7)
+axes[2].set_xlabel('Interval Index')
+axes[2].set_ylabel('RR Interval (seconds)')
+axes[2].set_title(f'Interval Comparison at Best Match (Position {best_pos_corr})')
+axes[2].legend()
+axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('ecg_matching_results.png', dpi=150, bbox_inches='tight')
+print("\nPlot saved as 'ecg_matching_results.png'")
+plt.show()
+
+print("\nAnalysis complete!")
