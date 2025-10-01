@@ -4,9 +4,9 @@ import os
 from pathlib import Path
 
 # === Configuration ===
-input_directory = "Bipolar ECG testing"  # Change this to your input directory path
-output_directory = "output"  # Directory where all JSON files will be saved
-file_group = "XML_direct_bipolar"  # Prefix for output files
+input_directory = "High RV leads"  # Change this to your input directory path
+output_directory = "output_xml"  # Directory where all JSON files will be saved
+file_group = "XML_High_RV"  # Prefix for output files
 
 def create_output_filename(file_path, input_dir, file_group):
     """Create output filename with subdirectory path included"""
