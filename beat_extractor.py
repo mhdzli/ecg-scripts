@@ -1,134 +1,76 @@
 import json
 import numpy as np
-import os
-import argparse
-from scipy import signal
+import scipy.signal as signal
+from scipy.signal import butter, filtfilt, find_peaks
 import matplotlib.pyplot as plt
-import glob
+import os
+from typing import List, Dict, Tuple, Optional
 
 class PanTompkinsDetector:
     """
-    Pan-Tompkins QRS detection algorithm implementation.
+    Pan-Tompkins QRS detection algorithm implementation
     """
+    def __init__(self, sampling_rate: int = 500):
+        self.sampling_rate = sampling_rate
+        self.window_size = int(0.15 * sampling_rate)  # 150ms integration window
+        
+    def bandpass_filter(self, signal_data: np.ndarray) -> np.ndarray:
+        """Apply bandpass filter (5-15 Hz)"""
+        nyquist = self.sampling_rate / 2
+        low = 5 / nyquist
+        high = 15 / nyquist
+        b, a = butter(2, [low, high], btype='band')
+        return filtfilt(b, a, signal_data)
     
-    def __init__(self, sampling_rate=500):
-        self.fs = sampling_rate
-        self.setup_filters()
-        
-    def setup_filters(self):
-        """Setup bandpass and derivative filters for Pan-Tompkins algorithm."""
-        # Bandpass filter: 5-15 Hz
-        # Low-pass filter coefficients (cutoff ~15 Hz)
-        self.lp_b = np.array([1, 0, 0, 0, 0, 0, -2, 0, 0, 0, 0, 0, 1]) / 32
-        self.lp_a = np.array([1, -2, 1])
-        
-        # High-pass filter coefficients (cutoff ~5 Hz)
-        self.hp_b = np.array([-1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, -32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]) / 32
-        self.hp_a = np.array([1, -1])
-        
-        # Derivative filter coefficients
-        self.deriv_b = np.array([1, 2, 0, -2, -1]) / 8
-        
-    def bandpass_filter(self, signal_data):
-        """Apply bandpass filter (5-15 Hz)."""
-        # Apply low-pass filter
-        lp_filtered = signal.lfilter(self.lp_b, self.lp_a, signal_data)
-        # Apply high-pass filter
-        bp_filtered = signal.lfilter(self.hp_b, self.hp_a, lp_filtered)
-        return bp_filtered
+    def derivative_filter(self, signal_data: np.ndarray) -> np.ndarray:
+        """Apply derivative filter to emphasize QRS slope"""
+        # 5-point derivative: y(n) = (1/8T)[-x(n-2) - 2x(n-1) + 2x(n+1) + x(n+2)]
+        derivative = np.zeros_like(signal_data)
+        for i in range(2, len(signal_data) - 2):
+            derivative[i] = (-signal_data[i-2] - 2*signal_data[i-1] + 
+                           2*signal_data[i+1] + signal_data[i+2]) / 8
+        return derivative
     
-    def derivative_filter(self, signal_data):
-        """Apply derivative filter."""
-        return signal.lfilter(self.deriv_b, [1], signal_data)
-    
-    def squaring(self, signal_data):
-        """Square the signal."""
+    def squaring(self, signal_data: np.ndarray) -> np.ndarray:
+        """Square the signal to make all peaks positive and emphasize higher frequencies"""
         return signal_data ** 2
     
-    def moving_window_integration(self, signal_data, window_size=None):
-        """Apply moving window integration."""
-        if window_size is None:
-            # Default window size: 150ms worth of samples
-            window_size = int(0.15 * self.fs)
-        
-        # Ensure window_size is odd
-        if window_size % 2 == 0:
-            window_size += 1
-            
-        # Moving average filter
-        return signal.convolve(signal_data, np.ones(window_size)/window_size, mode='same')
+    def moving_window_integration(self, signal_data: np.ndarray) -> np.ndarray:
+        """Apply moving window integration"""
+        integrated = np.zeros_like(signal_data)
+        for i in range(len(signal_data)):
+            start = max(0, i - self.window_size + 1)
+            integrated[i] = np.sum(signal_data[start:i+1]) / self.window_size
+        return integrated
     
-    def find_peaks_adaptive(self, signal_data, min_distance=None):
-        """
-        Find peaks using adaptive thresholding as in Pan-Tompkins algorithm.
-        """
-        if min_distance is None:
-            # Minimum distance between peaks (200ms = typical minimum RR interval)
-            min_distance = int(0.2 * self.fs)
+    def adaptive_threshold(self, integrated_signal: np.ndarray, 
+                          peaks: np.ndarray) -> Tuple[float, float]:
+        """Calculate adaptive thresholds"""
+        if len(peaks) == 0:
+            return np.max(integrated_signal) * 0.25, np.max(integrated_signal) * 0.125
         
-        # Initialize thresholds
-        spki = 0  # Signal peak
-        npki = 0  # Noise peak
-        threshold1 = 0
-        threshold2 = 0
+        # Get peak values
+        peak_values = integrated_signal[peaks]
         
-        # Learning phase - find initial peaks
-        peaks = []
-        rr_intervals = []
+        # Signal and noise peak estimates
+        spki = np.mean(peak_values[-8:]) if len(peak_values) >= 8 else np.mean(peak_values)
+        npki = np.mean(np.sort(peak_values)[:len(peak_values)//2]) if len(peak_values) > 1 else spki * 0.5
         
-        # Simple peak detection for initialization
-        initial_peaks, _ = signal.find_peaks(signal_data, 
-                                           height=np.max(signal_data) * 0.3,
-                                           distance=min_distance)
+        # Thresholds
+        threshold1 = npki + 0.25 * (spki - npki)
+        threshold2 = 0.5 * threshold1
         
-        if len(initial_peaks) < 2:
-            # If no peaks found, use a lower threshold
-            initial_peaks, _ = signal.find_peaks(signal_data, 
-                                               height=np.max(signal_data) * 0.1,
-                                               distance=min_distance)
-        
-        # Initialize thresholds based on initial peaks
-        if len(initial_peaks) > 0:
-            peak_heights = signal_data[initial_peaks]
-            spki = np.mean(peak_heights)
-            npki = np.mean(peak_heights) * 0.5
-            threshold1 = npki + 0.25 * (spki - npki)
-            threshold2 = 0.5 * threshold1
-        
-        # Adaptive peak detection
-        for i, peak_idx in enumerate(initial_peaks):
-            peak_height = signal_data[peak_idx]
-            
-            # Check if peak exceeds threshold
-            if peak_height > threshold1:
-                peaks.append(peak_idx)
-                
-                # Update signal peak
-                spki = 0.125 * peak_height + 0.875 * spki
-                
-                # Calculate RR interval
-                if len(peaks) > 1:
-                    rr_interval = peaks[-1] - peaks[-2]
-                    rr_intervals.append(rr_interval)
-                
-            else:
-                # Update noise peak
-                npki = 0.125 * peak_height + 0.875 * npki
-            
-            # Update thresholds
-            threshold1 = npki + 0.25 * (spki - npki)
-            threshold2 = 0.5 * threshold1
-        
-        return np.array(peaks), np.array(rr_intervals)
+        return threshold1, threshold2
     
-    def detect_qrs(self, ecg_signal):
+    def detect_qrs(self, ecg_signal: np.ndarray) -> np.ndarray:
         """
-        Complete Pan-Tompkins QRS detection pipeline.
+        Main Pan-Tompkins QRS detection function
+        Returns indices of detected QRS complexes
         """
-        # Step 1: Bandpass filter (5-15 Hz)
+        # Step 1: Bandpass filter
         filtered = self.bandpass_filter(ecg_signal)
         
-        # Step 2: Derivative filter
+        # Step 2: Derivative
         derivative = self.derivative_filter(filtered)
         
         # Step 3: Squaring
@@ -137,340 +79,274 @@ class PanTompkinsDetector:
         # Step 4: Moving window integration
         integrated = self.moving_window_integration(squared)
         
-        # Step 5: Adaptive peak detection
-        peaks, rr_intervals = self.find_peaks_adaptive(integrated)
+        # Step 5: Find peaks with adaptive thresholding
+        # Initial peak detection
+        min_distance = int(0.3 * self.sampling_rate)  # Minimum 300ms between peaks
+        initial_peaks, _ = find_peaks(integrated, distance=min_distance)
+        
+        if len(initial_peaks) == 0:
+            return np.array([])
+        
+        # Adaptive thresholding
+        threshold1, threshold2 = self.adaptive_threshold(integrated, initial_peaks)
+        
+        # Final peak detection with thresholds
+        final_peaks = []
+        for peak in initial_peaks:
+            if integrated[peak] > threshold1:
+                final_peaks.append(peak)
+        
+        # Search back for missed beats
+        for i in range(1, len(final_peaks)):
+            interval = final_peaks[i] - final_peaks[i-1]
+            if interval > 1.66 * np.mean(np.diff(final_peaks)):  # If interval is too long
+                # Look for peaks above threshold2 in the interval
+                start_search = final_peaks[i-1] + int(0.2 * self.sampling_rate)
+                end_search = final_peaks[i] - int(0.2 * self.sampling_rate)
+                
+                if start_search < end_search:
+                    search_region = integrated[start_search:end_search]
+                    local_peaks, _ = find_peaks(search_region)
+                    
+                    for local_peak in local_peaks:
+                        global_peak = start_search + local_peak
+                        if integrated[global_peak] > threshold2:
+                            final_peaks.append(global_peak)
+        
+        return np.array(sorted(final_peaks))
+
+class ECGBeatExtractor:
+    """
+    Extract individual heartbeat segments from ECG data
+    """
+    def __init__(self, sampling_rate: int = 500):
+        self.sampling_rate = sampling_rate
+        self.detector = PanTompkinsDetector(sampling_rate)
+        
+        # Beat extraction parameters
+        self.pre_r_samples = int(0.2 * sampling_rate)   # 200ms before R-peak
+        self.post_r_samples = int(0.4 * sampling_rate)  # 400ms after R-peak
+        self.beat_length = self.pre_r_samples + self.post_r_samples
+        
+    def load_ecg_json(self, json_file: str) -> Dict:
+        """Load ECG data from JSON file"""
+        with open(json_file, 'r') as f:
+            data = json.load(f)
+        return data
+    
+    def extract_beats_from_lead(self, lead_data: List[float], lead_name: str) -> Dict:
+        """Extract beats from a single ECG lead"""
+        ecg_signal = np.array(lead_data)
+        
+        # Detect QRS complexes
+        r_peaks = self.detector.detect_qrs(ecg_signal)
+        
+        beats = []
+        valid_beats = 0
+        
+        for i, r_peak in enumerate(r_peaks):
+            # Check if we have enough samples before and after R-peak
+            start_idx = r_peak - self.pre_r_samples
+            end_idx = r_peak + self.post_r_samples
+            
+            if start_idx >= 0 and end_idx < len(ecg_signal):
+                beat_segment = ecg_signal[start_idx:end_idx]
+                
+                beats.append({
+                    'beat_index': valid_beats,
+                    'r_peak_global_index': int(r_peak),
+                    'r_peak_time_seconds': float(r_peak / self.sampling_rate),
+                    'beat_segment': beat_segment.tolist(),
+                    'beat_length_samples': len(beat_segment),
+                    'pre_r_samples': self.pre_r_samples,
+                    'post_r_samples': self.post_r_samples
+                })
+                valid_beats += 1
+        
+        # Calculate RR intervals
+        rr_intervals = []
+        if len(r_peaks) > 1:
+            rr_intervals = np.diff(r_peaks) / self.sampling_rate  # Convert to seconds
         
         return {
-            'peaks': peaks,
-            'rr_intervals': rr_intervals,
-            'filtered_signal': filtered,
-            'derivative': derivative,
-            'squared': squared,
-            'integrated': integrated
+            'lead_name': lead_name,
+            'total_r_peaks_detected': len(r_peaks),
+            'valid_beats_extracted': valid_beats,
+            'r_peak_indices': r_peaks.tolist(),
+            'mean_rr_interval_seconds': float(np.mean(rr_intervals)) if len(rr_intervals) > 0 else None,
+            'heart_rate_bpm': float(60 / np.mean(rr_intervals)) if len(rr_intervals) > 0 else None,
+            'beats': beats
         }
+    
+    def extract_beats_from_json(self, json_file: str, output_file: Optional[str] = None,
+                              leads_to_process: Optional[List[str]] = None) -> Dict:
+        """
+        Extract beats from all leads in ECG JSON file
+        """
+        print(f"Loading ECG data from {json_file}...")
+        ecg_data = self.load_ecg_json(json_file)
+        
+        # Get available leads
+        available_leads = list(ecg_data['leads'].keys())
+        
+        # Determine which leads to process
+        if leads_to_process is None:
+            leads_to_process = available_leads
+        else:
+            leads_to_process = [lead for lead in leads_to_process if lead in available_leads]
+        
+        print(f"Processing leads: {leads_to_process}")
+        
+        # Extract beats from each lead
+        extracted_data = {
+            'metadata': {
+                'source_file': json_file,
+                'sampling_rate': ecg_data['metadata']['sampling_rate'],
+                'total_duration_seconds': ecg_data['metadata']['duration_seconds'],
+                'extraction_parameters': {
+                    'pre_r_samples': self.pre_r_samples,
+                    'post_r_samples': self.post_r_samples,
+                    'beat_length_samples': self.beat_length,
+                    'pre_r_duration_ms': self.pre_r_samples / self.sampling_rate * 1000,
+                    'post_r_duration_ms': self.post_r_samples / self.sampling_rate * 1000,
+                    'beat_duration_ms': self.beat_length / self.sampling_rate * 1000
+                },
+                'leads_processed': leads_to_process,
+                'algorithm': 'Pan-Tompkins QRS Detection'
+            },
+            'leads': {}
+        }
+        
+        for lead_name in leads_to_process:
+            print(f"Processing lead {lead_name}...")
+            lead_data = ecg_data['leads'][lead_name]
+            
+            lead_beats = self.extract_beats_from_lead(lead_data, lead_name)
+            extracted_data['leads'][lead_name] = lead_beats
+            
+            print(f"  - Detected {lead_beats['total_r_peaks_detected']} R-peaks")
+            print(f"  - Extracted {lead_beats['valid_beats_extracted']} valid beats")
+            if lead_beats['heart_rate_bpm']:
+                print(f"  - Estimated heart rate: {lead_beats['heart_rate_bpm']:.1f} BPM")
+        
+        # Save extracted beats
+        if output_file is None:
+            base_name = os.path.splitext(json_file)[0]
+            output_file = f"{base_name}_beats.json"
+        
+        print(f"Saving extracted beats to {output_file}...")
+        with open(output_file, 'w') as f:
+            json.dump(extracted_data, f, indent=2)
+        
+        print(f"Beat extraction completed!")
+        print(f"Output file: {output_file}")
+        print(f"File size: {os.path.getsize(output_file) / (1024*1024):.2f} MB")
+        
+        return extracted_data
 
-def extract_beats_from_json(json_file, output_folder, 
-                           lead_name='II', 
-                           beat_window_ms=600, 
-                           min_rr_ms=300, 
-                           max_rr_ms=2000,
-                           plot_detection=False):
+def visualize_beat_extraction(json_file: str, lead_name: str = 'II', 
+                            max_beats_to_show: int = 5, save_plot: bool = True):
     """
-    Extract individual beats from ECG JSON file using Pan-Tompkins algorithm.
-    
-    Args:
-        json_file (str): Path to ECG JSON file
-        output_folder (str): Output folder for beat files
-        lead_name (str): ECG lead to use for beat detection
-        beat_window_ms (int): Window size around each beat (milliseconds)
-        min_rr_ms (int): Minimum RR interval (milliseconds)
-        max_rr_ms (int): Maximum RR interval (milliseconds)
-        plot_detection (bool): Whether to plot detection results
+    Visualize the beat extraction results
     """
+    extractor = ECGBeatExtractor()
     
-    print(f"Processing {json_file}...")
-    
-    # Load ECG data
+    # Load original ECG data
     with open(json_file, 'r') as f:
         ecg_data = json.load(f)
     
-    # Extract metadata
-    if 'metadata' in ecg_data:
-        metadata = ecg_data['metadata']
-        leads = ecg_data['leads']
-        sampling_rate = metadata['sampling_rate']
-    else:
-        # Handle older format
-        leads = {k: v for k, v in ecg_data.items() if k != 'sampling_rate'}
-        sampling_rate = ecg_data['sampling_rate']
-        metadata = {'sampling_rate': sampling_rate}
+    # Extract beats
+    extracted_data = extractor.extract_beats_from_json(json_file, leads_to_process=[lead_name])
     
-    print(f"Sampling rate: {sampling_rate} Hz")
-    print(f"Available leads: {', '.join(leads.keys())}")
+    # Get the lead data
+    original_signal = np.array(ecg_data['leads'][lead_name])
+    lead_beats = extracted_data['leads'][lead_name]
+    r_peaks = np.array(lead_beats['r_peak_indices'])
     
-    # Check if requested lead exists
-    if lead_name not in leads:
-        print(f"Warning: Lead {lead_name} not found. Using first available lead.")
-        lead_name = list(leads.keys())[0]
+    # Create time axis
+    sampling_rate = ecg_data['metadata']['sampling_rate']
+    time_axis = np.arange(len(original_signal)) / sampling_rate
     
-    # Get ECG signal for beat detection
-    ecg_signal = np.array(leads[lead_name])
-    print(f"Using lead {lead_name} for beat detection")
-    print(f"Signal length: {len(ecg_signal)} samples ({len(ecg_signal)/sampling_rate:.2f} seconds)")
+    # Create plots
+    fig, axes = plt.subplots(2, 1, figsize=(15, 10))
     
-    # Initialize Pan-Tompkins detector
-    detector = PanTompkinsDetector(sampling_rate)
-    
-    # Detect QRS complexes
-    print("Running Pan-Tompkins QRS detection...")
-    detection_results = detector.detect_qrs(ecg_signal)
-    peaks = detection_results['peaks']
-    rr_intervals = detection_results['rr_intervals']
-    
-    print(f"Found {len(peaks)} potential QRS complexes")
-    
-    # Filter peaks based on RR interval constraints
-    min_rr_samples = int(min_rr_ms * sampling_rate / 1000)
-    max_rr_samples = int(max_rr_ms * sampling_rate / 1000)
-    
-    valid_peaks = []
-    for i, peak in enumerate(peaks):
-        if i == 0:
-            valid_peaks.append(peak)
-        else:
-            rr_interval = peak - peaks[i-1]
-            if min_rr_samples <= rr_interval <= max_rr_samples:
-                valid_peaks.append(peak)
-    
-    valid_peaks = np.array(valid_peaks)
-    print(f"After RR interval filtering: {len(valid_peaks)} valid beats")
-    
-    if len(valid_peaks) == 0:
-        print("No valid beats found!")
-        return
-    
-    # Create output folder
-    os.makedirs(output_folder, exist_ok=True)
-    
-    # Calculate beat window in samples
-    beat_window_samples = int(beat_window_ms * sampling_rate / 1000)
-    half_window = beat_window_samples // 2
-    
-    # Extract individual beats
-    beats_data = []
-    valid_beat_count = 0
-    prefix = os.path.splitext(json_file)[0]
-    for i, peak_idx in enumerate(valid_peaks):
-        # Define beat window
-        start_idx = max(0, peak_idx - half_window)
-        end_idx = min(len(ecg_signal), peak_idx + half_window)
-        
-        # Skip if window is too small
-        if end_idx - start_idx < beat_window_samples * 0.8:
-            continue
-        
-        # Extract beat data for all leads
-        beat_leads = {}
-        for lead, lead_data in leads.items():
-            beat_leads[lead] = lead_data[start_idx:end_idx]
-        
-        # Beat metadata
-        beat_metadata = {
-            'beat_number': valid_beat_count,
-            'peak_index': int(peak_idx),
-            'start_index': int(start_idx),
-            'end_index': int(end_idx),
-            'peak_time_seconds': float(peak_idx / sampling_rate),
-            'beat_duration_ms': len(beat_leads[lead_name]) * 1000 / sampling_rate,
-            'sampling_rate': sampling_rate,
-            'detection_lead': lead_name,
-            'source_file': json_file
-        }
-        
-        # Add RR interval if available
-        if i > 0:
-            rr_interval_samples = peak_idx - valid_peaks[i-1]
-            beat_metadata['rr_interval_ms'] = float(rr_interval_samples * 1000 / sampling_rate)
-            beat_metadata['heart_rate_bpm'] = 60000 / beat_metadata['rr_interval_ms']
-        
-        # Create beat data structure
-        beat_data = {
-            'metadata': beat_metadata,
-            'leads': beat_leads
-        }
-        
-        beats_data.append(beat_data)
-        
-        # Save individual beat file
-        beat_filename = f"{output_folder}/{prefix}_beat_{valid_beat_count:04d}.json"
-        with open(beat_filename, 'w') as f:
-            json.dump(beat_data, f, indent=2)
-        
-        valid_beat_count += 1
-    
-    print(f"Extracted {valid_beat_count} beats to '{output_folder}/'")
-    
-    # Save summary file
-    summary_data = {
-        'source_file': json_file,
-        'detection_parameters': {
-            'detection_lead': lead_name,
-            'beat_window_ms': beat_window_ms,
-            'min_rr_ms': min_rr_ms,
-            'max_rr_ms': max_rr_ms,
-            'sampling_rate': sampling_rate
-        },
-        'results': {
-            'total_beats_detected': len(peaks),
-            'valid_beats_extracted': valid_beat_count,
-            'average_rr_interval_ms': float(np.mean(rr_intervals) * 1000 / sampling_rate) if len(rr_intervals) > 0 else None,
-            'average_heart_rate_bpm': 60000 / (np.mean(rr_intervals) * 1000 / sampling_rate) if len(rr_intervals) > 0 else None
-        },
-        'beat_files': [f"beat_{i:04d}.json" for i in range(valid_beat_count)]
-    }
-    
-    summary_filename = f"{output_folder}/{prefix}_beats_summary.json"
-    with open(summary_filename, 'w') as f:
-        json.dump(summary_data, f, indent=2)
-    
-    # Plot detection results if requested
-    if plot_detection:
-        plot_detection_results(ecg_signal, detection_results, valid_peaks, 
-                             sampling_rate, output_folder, lead_name)
-    
-    return beats_data
-
-def plot_detection_results(ecg_signal, detection_results, valid_peaks, 
-                         sampling_rate, output_folder, lead_name):
-    """Plot Pan-Tompkins detection results."""
-    
-    time_axis = np.arange(len(ecg_signal)) / sampling_rate
-    
-    fig, axes = plt.subplots(5, 1, figsize=(15, 12))
-    fig.suptitle(f'Pan-Tompkins QRS Detection Results - Lead {lead_name}', fontsize=16)
-    
-    # Original signal
-    axes[0].plot(time_axis, ecg_signal, 'b-', linewidth=0.8)
-    axes[0].plot(time_axis[valid_peaks], ecg_signal[valid_peaks], 'ro', markersize=4)
-    axes[0].set_title('Original ECG Signal with Detected Beats')
+    # Plot 1: Original signal with detected R-peaks
+    axes[0].plot(time_axis, original_signal, 'b-', linewidth=0.8, label=f'Lead {lead_name}')
+    axes[0].plot(r_peaks / sampling_rate, original_signal[r_peaks], 'ro', 
+                markersize=6, label='Detected R-peaks')
+    axes[0].set_xlabel('Time (seconds)')
     axes[0].set_ylabel('Amplitude (mV)')
+    axes[0].set_title(f'ECG Signal with Detected R-peaks - Lead {lead_name}')
+    axes[0].legend()
     axes[0].grid(True, alpha=0.3)
     
-    # Filtered signal
-    axes[1].plot(time_axis, detection_results['filtered_signal'], 'g-', linewidth=0.8)
-    axes[1].set_title('Bandpass Filtered (5-15 Hz)')
-    axes[1].set_ylabel('Amplitude')
+    # Plot 2: Individual beat segments
+    beats_to_show = min(max_beats_to_show, len(lead_beats['beats']))
+    beat_time_axis = np.arange(extractor.beat_length) / sampling_rate * 1000 - \
+                     extractor.pre_r_samples / sampling_rate * 1000
+    
+    colors = plt.cm.tab10(np.linspace(0, 1, beats_to_show))
+    for i in range(beats_to_show):
+        beat_data = np.array(lead_beats['beats'][i]['beat_segment'])
+        axes[1].plot(beat_time_axis, beat_data, color=colors[i], 
+                    linewidth=1.5, label=f'Beat {i+1}')
+    
+    axes[1].axvline(x=0, color='red', linestyle='--', alpha=0.7, label='R-peak')
+    axes[1].set_xlabel('Time relative to R-peak (ms)')
+    axes[1].set_ylabel('Amplitude (mV)')
+    axes[1].set_title(f'Individual Beat Segments - Lead {lead_name}')
+    axes[1].legend()
     axes[1].grid(True, alpha=0.3)
-    
-    # Derivative
-    axes[2].plot(time_axis, detection_results['derivative'], 'orange', linewidth=0.8)
-    axes[2].set_title('Derivative Filter Output')
-    axes[2].set_ylabel('Amplitude')
-    axes[2].grid(True, alpha=0.3)
-    
-    # Squared
-    axes[3].plot(time_axis, detection_results['squared'], 'purple', linewidth=0.8)
-    axes[3].set_title('Squared Signal')
-    axes[3].set_ylabel('Amplitude')
-    axes[3].grid(True, alpha=0.3)
-    
-    # Integrated with peaks
-    axes[4].plot(time_axis, detection_results['integrated'], 'r-', linewidth=0.8)
-    axes[4].plot(time_axis[valid_peaks], detection_results['integrated'][valid_peaks], 'ko', markersize=4)
-    axes[4].set_title('Moving Window Integration with Detected Peaks')
-    axes[4].set_ylabel('Amplitude')
-    axes[4].set_xlabel('Time (seconds)')
-    axes[4].grid(True, alpha=0.3)
     
     plt.tight_layout()
     
-    # Save plot
-    plot_filename = f"{output_folder}/detection_results.png"
-    plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
-    plt.close()
+    if save_plot:
+        plot_filename = f"{os.path.splitext(json_file)[0]}_beat_extraction_visualization.png"
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        print(f"Visualization saved as: {plot_filename}")
     
-    print(f"Detection plot saved to {plot_filename}")
+    plt.show()
 
 def main():
-    parser = argparse.ArgumentParser(description="Extract ECG beats using Pan-Tompkins algorithm")
+    """
+    Main function to demonstrate beat extraction
+    """
+    # Configuration
+    input_json_file = "china_ecg_complete_data_954064495204269526041_2019-04-26154016.json"
     
-    # Change input_file to input_path to handle both files and directories
-    parser.add_argument("input_path", help="Input ECG JSON file or directory containing JSON files")
-    parser.add_argument("-o", "--output", default="extracted_beats", 
-                       help="Output folder for beat files (default: extracted_beats)")
-    parser.add_argument("-l", "--lead", default="II", 
-                       help="ECG lead for beat detection (default: II)")
-    parser.add_argument("-w", "--window", type=int, default=600,
-                       help="Beat window size in milliseconds (default: 600)")
-    parser.add_argument("--min-rr", type=int, default=300,
-                       help="Minimum RR interval in milliseconds (default: 300)")
-    parser.add_argument("--max-rr", type=int, default=2000,
-                       help="Maximum RR interval in milliseconds (default: 2000)")
-    parser.add_argument("--plot", action="store_true",
-                       help="Generate detection result plots")
-    
-    args = parser.parse_args()
-    
-    # Determine if input is a file or directory
-    if os.path.isfile(args.input_path):
-        # Single file processing
-        json_files = [args.input_path]
-        print("=== ECG Beat Extractor with Pan-Tompkins Algorithm ===")
-        print(f"Processing single file: {args.input_path}")
-    elif os.path.isdir(args.input_path):
-        # Directory processing - find all JSON files
-        json_pattern = os.path.join(args.input_path, "*.json")
-        json_files = glob.glob(json_pattern)
-        
-        if not json_files:
-            print(f"Error: No JSON files found in directory '{args.input_path}'!")
-            return
-        
-        print("=== ECG Beat Extractor with Pan-Tompkins Algorithm (Batch Mode) ===")
-        print(f"Processing directory: {args.input_path}")
-        print(f"Found {len(json_files)} JSON files:")
-        for file in json_files:
-            print(f"  - {os.path.basename(file)}")
-    else:
-        print(f"Error: Input path '{args.input_path}' is neither a file nor a directory!")
+    # Check if input file exists
+    if not os.path.exists(input_json_file):
+        print(f"Error: Input file '{input_json_file}' not found!")
+        print("Please make sure the JSON file from your conversion script exists.")
         return
     
-    print(f"Output folder: {args.output}")
-    print(f"Detection lead: {args.lead}")
-    print(f"Beat window: {args.window} ms")
-    print(f"RR interval range: {args.min_rr}-{args.max_rr} ms")
-    print()
+    # Create beat extractor
+    extractor = ECGBeatExtractor(sampling_rate=500)
     
-    # Process each JSON file
-    total_beats = 0
-    successful_files = 0
-    
-    for i, json_file in enumerate(json_files, 1):
-        try:
-            print(f"=== Processing file {i}/{len(json_files)}: {os.path.basename(json_file)} ===")
-            
-            # Create individual output folder for each file
-            base_name = os.path.splitext(os.path.basename(json_file))[0]
-            file_output_folder = os.path.join(args.output, f"{base_name}_beats")
-            
-            # Extract beats
-            beats = extract_beats_from_json(
-                json_file, 
-                file_output_folder,
-                lead_name=args.lead,
-                beat_window_ms=args.window,
-                min_rr_ms=args.min_rr,
-                max_rr_ms=args.max_rr,
-                plot_detection=args.plot
-            )
-            
-            if beats:
-                total_beats += len(beats)
-                successful_files += 1
-                print(f"✓ Successfully extracted {len(beats)} beats from {os.path.basename(json_file)}")
-            else:
-                print(f"⚠ No beats extracted from {os.path.basename(json_file)}")
-            
-            print()  # Add spacing between files
-            
-        except Exception as e:
-            print(f"✗ ERROR processing {os.path.basename(json_file)}: {str(e)}")
-            print()
-            continue
+    # Extract beats from all leads
+    print("=== ECG Beat Extraction ===")
+    extracted_data = extractor.extract_beats_from_json(
+        input_json_file,
+        leads_to_process=['I', 'II', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']  # Focus on measured leads
+    )
     
     # Print summary
-    print("=" * 60)
-    print("BATCH PROCESSING SUMMARY")
-    print("=" * 60)
-    print(f"Total files processed: {len(json_files)}")
-    print(f"Successful extractions: {successful_files}")
-    print(f"Failed extractions: {len(json_files) - successful_files}")
-    print(f"Total beats extracted: {total_beats}")
-    if successful_files > 0:
-        print(f"Average beats per file: {total_beats / successful_files:.1f}")
-    print(f"Output location: {args.output}/")
-    print("\nBeat extraction complete!")
-
+    print("\n=== Extraction Summary ===")
+    for lead_name, lead_info in extracted_data['leads'].items():
+        print(f"Lead {lead_name}:")
+        print(f"  - R-peaks detected: {lead_info['total_r_peaks_detected']}")
+        print(f"  - Valid beats extracted: {lead_info['valid_beats_extracted']}")
+        if lead_info['heart_rate_bpm']:
+            print(f"  - Heart rate: {lead_info['heart_rate_bpm']:.1f} BPM")
+        print()
+    
+    # Create visualization for Lead II (commonly used for rhythm analysis)
+    print("Creating visualization...")
+    try:
+        visualize_beat_extraction(input_json_file, lead_name='II', max_beats_to_show=5)
+    except Exception as e:
+        print(f"Visualization failed: {e}")
+        print("Beat extraction completed successfully despite visualization error.")
 
 if __name__ == "__main__":
     main()
